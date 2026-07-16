@@ -1,0 +1,94 @@
+@import '@coinbase/onchainkit/styles.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-gold: #f5c842;
+    --color-win:  #00e676;
+    --color-bg:   #0a0a0a;
+  }
+
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+
+  body {
+    @apply bg-bg text-white font-body antialiased;
+    min-height: 100dvh;
+  }
+
+  /* Tabular numerals everywhere money or lines appear */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+
+  /* Visible focus for keyboard nav */
+  :focus-visible {
+    @apply outline-none ring-2 ring-gold ring-offset-2 ring-offset-bg;
+  }
+}
+
+@layer components {
+  /* "=" equals sign used as structural divider */
+  .eq-divider {
+    @apply flex items-center gap-3 text-gold/50 font-display text-sm tracking-widest uppercase;
+  }
+  .eq-divider::before,
+  .eq-divider::after {
+    content: '';
+    @apply flex-1 h-px bg-gold/20;
+  }
+
+  /* Ticket stub card shell */
+  .ticket {
+    @apply relative bg-[#111] border border-white/10 rounded-lg overflow-hidden;
+  }
+  .ticket::before {
+    content: '';
+    @apply absolute inset-x-0 top-0 h-0.5 bg-gold/30;
+  }
+
+  /* Gold accent button */
+  .btn-gold {
+    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg
+           bg-gold text-black font-display font-semibold text-sm uppercase tracking-wider
+           transition-opacity hover:opacity-90 active:opacity-80
+           focus-visible:ring-2 focus-visible:ring-gold focus-visible:ring-offset-2 focus-visible:ring-offset-bg
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  /* Ghost button */
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg
+           border border-white/20 text-white/80 font-display font-semibold text-sm uppercase tracking-wider
+           transition-colors hover:border-white/40 hover:text-white
+           focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:ring-offset-2 focus-visible:ring-offset-bg;
+  }
+}
+
+/* Override OnchainKit button to match brand */
+.ock-connect-wallet {
+  @apply btn-gold !important;
+}

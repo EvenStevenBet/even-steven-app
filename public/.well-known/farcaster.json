@@ -1,0 +1,17 @@
+{
+  "accountAssociation": {
+    "header": "PLACEHOLDER — owner must sign this for the production domain",
+    "payload": "PLACEHOLDER",
+    "signature": "PLACEHOLDER"
+  },
+  "frame": {
+    "version": "1",
+    "name": "Even Steven",
+    "iconUrl": "https://evensteven.bet/icon.png",
+    "homeUrl": "https://evensteven.bet",
+    "imageUrl": "https://evensteven.bet/opengraph-image",
+    "splashImageUrl": "https://evensteven.bet/splash.png",
+    "splashBackgroundColor": "#0a0a0a",
+    "webhookUrl": "https://evensteven.bet/api/webhook"
+  }
+}
