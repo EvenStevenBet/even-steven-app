@@ -32,7 +32,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
           }}
         >
           {/* MiniKitProvider enables Base App + Farcaster Mini App context detection */}
-          <MiniKitProvider>
+          <MiniKitProvider chain={chain}>
             {children}
           </MiniKitProvider>
         </OnchainKitProvider>
