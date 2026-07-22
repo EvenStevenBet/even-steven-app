@@ -30,13 +30,13 @@ const TESTNET = {
 // Friction table — source: README.md "What you actually pay"
 // All numbers from April 2026 screenshots + published fee schedules
 const FRICTION = [
-  { platform: 'Even Steven',     depth: 'Any market, any size',   taker: '2.00%', over: '0%',      slip: '0%',      settle: '0%',   total: '2.00%', hl: true  },
-  { platform: 'Polymarket US',   depth: 'Liquid (NFL/NBA main)',  taker: '2.50%', over: '~2%',     slip: '~0.4%',   settle: '0%',   total: '~4.9%', hl: false },
-  { platform: 'Polymarket Global', depth: 'Liquid ($1M+ vol)',    taker: '0.75%', over: '~2%',     slip: '~0.4%',   settle: '0%',   total: '~4.7%', hl: false },
-  { platform: 'Kalshi',          depth: 'Liquid (NBA playoffs)',  taker: '3.50%', over: '~2%',     slip: '~0.5%',   settle: '2.00%', total: '~8.0%', hl: false },
-  { platform: 'Polymarket US',   depth: 'Medium (NBA prop)',      taker: '2.50%', over: '~4%',     slip: '~0.8%',   settle: '0%',   total: '~7–8%', hl: false },
-  { platform: 'Kalshi',          depth: 'Medium liquidity',       taker: '3.50%', over: '~3–4%',   slip: '~1%',     settle: '2.00%', total: '~12–15%', hl: false },
-  { platform: 'Polymarket',      depth: 'Illiquid ($0 vol)',      taker: '0.75–2.50%', over: '~9%+', slip: '~3.5%+', settle: '0%',  total: '~17–20%+', hl: false },
+  { platform: 'Even Steven',     depth: 'Any',      taker: '2.00%', over: '0%',      slip: '0%',      settle: '0%',   total: '2.00%', hl: true  },
+  { platform: 'Polymarket US',   depth: 'Liquid',   taker: '2.50%', over: '~2%',     slip: '~0.4%',   settle: '0%',   total: '~4.9%', hl: false },
+  { platform: 'Polymarket Global', depth: 'Liquid', taker: '0.75%', over: '~2%',     slip: '~0.4%',   settle: '0%',   total: '~4.7%', hl: false },
+  { platform: 'Kalshi',          depth: 'Liquid',   taker: '3.50%', over: '~2%',     slip: '~0.5%',   settle: '2.00%', total: '~8.0%', hl: false },
+  { platform: 'Polymarket US',   depth: 'Medium',   taker: '2.50%', over: '~4%',     slip: '~0.8%',   settle: '0%',   total: '~7–8%', hl: false },
+  { platform: 'Kalshi',          depth: 'Medium',   taker: '3.50%', over: '~3–4%',   slip: '~1%',     settle: '2.00%', total: '~12–15%', hl: false },
+  { platform: 'Polymarket',      depth: 'Illiquid', taker: '0.75–2.50%', over: '~9%+', slip: '~3.5%+', settle: '0%',  total: '~17–20%+', hl: false },
 ] as const
 
 export default function HowItWorksPage() {
@@ -155,12 +155,12 @@ export default function HowItWorksPage() {
             <thead>
               <tr className="border-b border-white/10">
                 <th className="text-left py-2 pr-4 font-display font-semibold text-white/50 uppercase tracking-widest">Platform</th>
-                <th className="text-left py-2 pr-4 font-display font-semibold text-white/50 uppercase tracking-widest">Market Depth</th>
-                <th className="text-right py-2 pr-4 font-display font-semibold text-white/50 uppercase tracking-widest tabular">Taker Fee</th>
-                <th className="text-right py-2 pr-4 font-display font-semibold text-white/50 uppercase tracking-widest tabular">Overround</th>
-                <th className="text-right py-2 pr-4 font-display font-semibold text-white/50 uppercase tracking-widest tabular">Slippage</th>
-                <th className="text-right py-2 pr-4 font-display font-semibold text-white/50 uppercase tracking-widest tabular">Settlement</th>
-                <th className="text-right py-2 font-display font-bold text-white/70 uppercase tracking-widest tabular">Total</th>
+                <th className="text-right py-2 pr-4 font-display font-bold text-white/70 uppercase tracking-widest tabular">Total</th>
+                <th className="text-left py-2 pr-4 font-display font-semibold text-white/50 uppercase tracking-widest">Depth</th>
+                <th className="text-right py-2 pr-4 font-display font-semibold text-white/50 uppercase tracking-widest tabular">Fee</th>
+                <th className="text-right py-2 pr-4 font-display font-semibold text-white/50 uppercase tracking-widest tabular">Over</th>
+                <th className="text-right py-2 pr-4 font-display font-semibold text-white/50 uppercase tracking-widest tabular">Slip</th>
+                <th className="text-right py-2 font-display font-semibold text-white/50 uppercase tracking-widest tabular">Settle</th>
               </tr>
             </thead>
             <tbody>
@@ -177,14 +177,14 @@ export default function HowItWorksPage() {
                   <td className={`py-2.5 pr-4 font-semibold ${row.hl ? 'text-gold' : 'text-white/80'}`}>
                     {row.platform}
                   </td>
+                  <td className={`py-2.5 pr-4 text-right tabular font-bold ${row.hl ? 'text-gold' : 'text-white/80'}`}>
+                    {row.total}
+                  </td>
                   <td className="py-2.5 pr-4 text-white/50">{row.depth}</td>
                   <td className="py-2.5 pr-4 text-right tabular text-white/70">{row.taker}</td>
                   <td className="py-2.5 pr-4 text-right tabular text-white/70">{row.over}</td>
                   <td className="py-2.5 pr-4 text-right tabular text-white/70">{row.slip}</td>
-                  <td className="py-2.5 pr-4 text-right tabular text-white/70">{row.settle}</td>
-                  <td className={`py-2.5 text-right tabular font-bold ${row.hl ? 'text-gold' : 'text-white/80'}`}>
-                    {row.total}
-                  </td>
+                  <td className="py-2.5 text-right tabular text-white/70">{row.settle}</td>
                 </tr>
               ))}
             </tbody>
