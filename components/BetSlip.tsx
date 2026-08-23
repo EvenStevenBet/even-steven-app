@@ -222,6 +222,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
       setStep('success')
       refetchBalance()
     } catch (err) {
+      console.error('placeBet failed:', err)
       setStep('error')
       setErrorMessage(describeError(err))
     }
