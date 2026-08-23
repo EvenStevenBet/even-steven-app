@@ -22,7 +22,8 @@ async function getMarkets() {
 }
 
 export default async function HomePage() {
-  const markets = await getMarkets()
+  const allMarkets = await getMarkets()
+  const markets = allMarkets.filter(m => m.isLive)
   const hasMarkets = markets.length > 0
 
   return (
