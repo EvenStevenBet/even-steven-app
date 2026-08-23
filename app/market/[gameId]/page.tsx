@@ -3,6 +3,7 @@ import Link from 'next/link'
 import { enrichMarket } from '@/lib/markets'
 import type { MarketRow } from '@/lib/markets'
 import { APP_URL } from '@/lib/chain'
+import { BetSlip } from '@/components/BetSlip'
 
 export const revalidate = 60
 
@@ -78,19 +79,12 @@ export default async function MarketPage({ params }: Props) {
         </p>
       </header>
 
-      {/* Stage 1 placeholder — bet slip ships in Stage 2 */}
       {market.isLive ? (
-        <div className="ticket p-6 space-y-4">
-          <div className="eq-divider text-xs" aria-hidden>
-            bet slip
-          </div>
-          <p className="text-center text-white/50 text-sm py-4">
-            Bet placement coming soon.{' '}
-            <Link href="/how-it-works" className="text-gold underline underline-offset-2">
-              Learn how it works →
-            </Link>
-          </p>
-        </div>
+        <BetSlip
+          marketAddress={market.marketAddress as `0x${string}`}
+          homeTeam={market.parsedHome}
+          awayTeam={market.parsedAway}
+        />
       ) : (
         <div className="ticket p-6 text-center space-y-3">
           <p className="font-display text-xl font-semibold text-white/80">
