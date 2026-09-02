@@ -21,9 +21,14 @@ async function getMarkets() {
   }
 }
 
+const HIDDEN_UNTIL_UMA_FIX = [
+  'NFL-2026-08-22-HOME-Lions-AWAY-Commanders',
+  'NFL-2026-08-23-HOME-Titans-AWAY-Seahawks',
+]
+
 export default async function HomePage() {
   const allMarkets = await getMarkets()
-  const markets = allMarkets.filter(m => m.isLive)
+  const markets = allMarkets.filter(m => m.isLive && !HIDDEN_UNTIL_UMA_FIX.includes(m.gameId))
   const hasMarkets = markets.length > 0
 
   return (
