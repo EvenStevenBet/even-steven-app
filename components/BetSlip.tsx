@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { BaseError, formatUnits, parseUnits } from 'viem'
+import { BaseError, decodeEventLog, formatUnits, parseUnits } from 'viem'
 import { useAccount, useConnect, usePublicClient, useReadContract, useWriteContract } from 'wagmi'
 import { USDC_ADDRESS, BASESCAN_URL } from '@/lib/chain'
 import { marketAbi, erc20Abi } from '@/lib/contracts'
@@ -71,6 +71,15 @@ function fmtUsdc(raw: bigint | undefined): string {
   })
 }
 
+function fmtSpread(z: bigint): string {
+  const n = Number(z) / 10000
+  if (n === 0) return 'PK' // pick'em
+  const sign = n > 0 ? '+' : ''
+  // Show one decimal only if needed (e.g. -3.5, not -3.0)
+  const formatted = Number.isInteger(n) ? `${sign}${n}` : `${sign}${n.toFixed(1)}`
+  return formatted
+}
+
 export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
   const { address, isConnected } = useAccount()
   const publicClient = usePublicClient()
@@ -82,6 +91,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
   const [step, setStep] = useState<Step>('idle')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [successTxHash, setSuccessTxHash] = useState<`0x${string}` | null>(null)
+  const [lockedZAtPlacement, setLockedZAtPlacement] = useState<bigint | null>(null)
 
   let stakeBigInt: bigint | null = null
   let stakeParseError = false
@@ -103,6 +113,16 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
     abi: marketAbi,
     functionName: 'bettingOpen',
   })
+
+  const { data: marketState, isLoading: marketStateLoading } = useReadContract({
+    address: marketAddress,
+    abi: marketAbi,
+    functionName: 'getMarketState',
+  })
+
+  // currentZ is the second return value (index 1), int256, 4-decimal fixed-point
+  // Derive bettingOpenFromState as a fallback — the existing bettingOpen call still runs
+  const currentZ: bigint | undefined = marketState ? (marketState as readonly [string, bigint, bigint, bigint, bigint, boolean, boolean])[1] : undefined
 
   const { data: usdcBalance, refetch: refetchBalance } = useReadContract({
     address: USDC_ADDRESS,
@@ -156,6 +176,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
     setStep('idle')
     setErrorMessage(null)
     setSuccessTxHash(null)
+    setLockedZAtPlacement(null)
   }
 
   async function handleSubmit() {
@@ -218,6 +239,24 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
         throw new Error('placeBet transaction reverted on-chain.')
       }
 
+      // Decode lockedZ from the BetPlaced event in the receipt
+      for (const log of betReceipt.logs) {
+        try {
+          const decoded = decodeEventLog({
+            abi: marketAbi,
+            data: log.data,
+            topics: log.topics,
+            eventName: 'BetPlaced',
+          })
+          if (decoded.eventName === 'BetPlaced') {
+            setLockedZAtPlacement(decoded.args.lockedZ)
+            break
+          }
+        } catch {
+          // skip unrelated logs
+        }
+      }
+
       setSuccessTxHash(betHash)
       setStep('success')
       refetchBalance()
@@ -249,6 +288,14 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
   return (
     <div className="ticket p-6 space-y-5">
       <div className="eq-divider text-xs" aria-hidden>bet slip</div>
+
+      {/* Current Z line — fetched from contract on load */}
+      <div className="flex items-center justify-between py-2 border-b border-white/10">
+        <span className="text-xs text-white/50 uppercase tracking-widest font-display">Current line</span>
+        <span className="font-display text-xl font-bold text-gold tabular">
+          {marketStateLoading || currentZ === undefined ? '—' : fmtSpread(currentZ)}
+        </span>
+      </div>
 
       {/* Side selection */}
       <div className="grid grid-cols-2 gap-2">
@@ -363,6 +410,11 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
         >
           View transaction on BaseScan →
         </a>
+      )}
+      {lockedZAtPlacement !== null && (
+        <p className="text-xs text-white/50 tabular">
+          Your line locked at <span className="text-white/80 font-semibold">{fmtSpread(lockedZAtPlacement)}</span>
+        </p>
       )}
 
       {/* Submit / connect */}

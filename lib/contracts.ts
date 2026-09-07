@@ -8,6 +8,8 @@ export const marketAbi = parseAbi([
   'function simulatePayout(uint256 stake, bool greaterThan) view returns (uint256 estimatedPayout)',
   'function getMarketEV(uint256 stake, bool greaterThan) view returns (uint256 currentPayout, uint256 liquidPayout, uint256 impliedVig)',
   'function bettingOpen() view returns (bool)',
+  'function getMarketState() view returns (string _gameId, int256 z, uint256 gPool, uint256 lePool, uint256 tPool, bool isOpen, bool isSettled)',
+  'event BetPlaced(address indexed bettor, uint256 indexed betId, uint256 stake, uint256 fee, bool greaterThan, int256 lockedZ)',
 ])
 
 export const erc20Abi = parseAbi([
