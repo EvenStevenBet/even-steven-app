@@ -111,6 +111,20 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
   const [lockedZAtPlacement, setLockedZAtPlacement] = useState<bigint | null>(null)
   const [pendingCallsId, setPendingCallsId] = useState<string | null>(null)
 
+  // A different wallet connecting (or the same wallet reconnecting) should not
+  // show the previous session's result. Also clears pendingCallsId so a
+  // still-in-flight gasless batch from the old session can't resolve later and
+  // flip step back to success/error out from under the new session — clearing
+  // step/errorMessage/successTxHash alone isn't enough since useCallsStatus
+  // below keeps polling on the stale id otherwise.
+  useEffect(() => {
+    setStep('idle')
+    setErrorMessage(null)
+    setSuccessTxHash(null)
+    setLockedZAtPlacement(null)
+    setPendingCallsId(null)
+  }, [address])
+
   // Smart-wallet path only: poll the sendCalls bundle until its receipts land,
   // then pull the real tx hash out of them — sendCalls itself never returns one.
   const { data: callsStatus } = useCallsStatus({
