@@ -1,13 +1,24 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { BaseError, decodeEventLog, formatUnits, parseUnits } from 'viem'
-import { useAccount, useConnect, usePublicClient, useReadContract, useWriteContract } from 'wagmi'
+import { BaseError, decodeEventLog, encodeFunctionData, formatUnits, parseUnits } from 'viem'
+import {
+  useAccount,
+  useCallsStatus,
+  useConnect,
+  usePublicClient,
+  useReadContract,
+  useSendCalls,
+  useWriteContract,
+} from 'wagmi'
 import { USDC_ADDRESS, BASESCAN_URL } from '@/lib/chain'
 import { marketAbi, erc20Abi } from '@/lib/contracts'
+import { useIsSmartWallet } from '@/lib/useSmartWallet'
 
 const MIN_STAKE = BigInt(1_000_000) // 1 USDC, 6 decimals
 const FEE_BPS = BigInt(200)         // 2% — matches FEE_PERCENT on-chain (CLAUDE.md)
+// Circle USDC on Base requires max approval — exact amounts fail intermittently (CLAUDE.md).
+const MAX_UINT256 = (BigInt(1) << BigInt(256)) - BigInt(1)
 
 // Wallets' built-in gas estimation has been observed returning wildly
 // inflated values (~140M gas, near a full block) for these calls, which RPC
@@ -32,6 +43,8 @@ type Step =
   | 'confirming_approval'
   | 'awaiting_bet_signature'
   | 'confirming_bet'
+  | 'awaiting_batch_signature'
+  | 'confirming_batch'
   | 'success'
   | 'error'
 
@@ -41,6 +54,8 @@ const STEP_LABEL: Record<Step, string> = {
   confirming_approval: 'Approval submitted — waiting for confirmation…',
   awaiting_bet_signature: 'Confirm the bet in your wallet…',
   confirming_bet: 'Bet submitted — waiting for confirmation…',
+  awaiting_batch_signature: 'Confirm the bet in your wallet…',
+  confirming_batch: 'Confirming your bet…',
   success: 'Bet placed.',
   error: 'Something went wrong.',
 }
@@ -85,6 +100,8 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
   const publicClient = usePublicClient()
   const { writeContractAsync } = useWriteContract()
   const { connect, connectors, isPending: isConnecting, error: connectError, variables: connectVariables } = useConnect()
+  const isSmartWallet = useIsSmartWallet()
+  const { sendCallsAsync } = useSendCalls()
 
   const [side, setSide] = useState<'home' | 'away' | null>(null)
   const [stakeInput, setStakeInput] = useState('')
@@ -92,6 +109,17 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [successTxHash, setSuccessTxHash] = useState<`0x${string}` | null>(null)
   const [lockedZAtPlacement, setLockedZAtPlacement] = useState<bigint | null>(null)
+  const [pendingCallsId, setPendingCallsId] = useState<string | null>(null)
+
+  // Smart-wallet path only: poll the sendCalls bundle until its receipts land,
+  // then pull the real tx hash out of them — sendCalls itself never returns one.
+  const { data: callsStatus } = useCallsStatus({
+    id: pendingCallsId ?? '',
+    query: {
+      enabled: pendingCallsId !== null,
+      refetchInterval: (query) => (query.state.data?.status === 'pending' ? 1000 : false),
+    },
+  })
 
   let stakeBigInt: bigint | null = null
   let stakeParseError = false
@@ -159,7 +187,9 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
     step === 'awaiting_approval_signature' ||
     step === 'confirming_approval' ||
     step === 'awaiting_bet_signature' ||
-    step === 'confirming_bet'
+    step === 'confirming_bet' ||
+    step === 'awaiting_batch_signature' ||
+    step === 'confirming_batch'
 
   const canSubmit =
     isConnected &&
@@ -177,12 +207,86 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
     setErrorMessage(null)
     setSuccessTxHash(null)
     setLockedZAtPlacement(null)
+    setPendingCallsId(null)
   }
 
+  // Resolve the smart-wallet batch once its receipts land: pull the real
+  // placeBet tx hash and lockedZ out of the receipts (sendCalls itself never
+  // returns a tx hash — only a bundle id).
+  useEffect(() => {
+    if (pendingCallsId === null || !callsStatus) return
+
+    if (callsStatus.status === 'success') {
+      let txHash: `0x${string}` | undefined
+      for (const receipt of callsStatus.receipts ?? []) {
+        txHash = receipt.transactionHash
+        for (const log of receipt.logs) {
+          try {
+            const decoded = decodeEventLog({
+              abi: marketAbi,
+              data: log.data,
+              topics: log.topics as [`0x${string}`, ...`0x${string}`[]] | [],
+              eventName: 'BetPlaced',
+            })
+            if (decoded.eventName === 'BetPlaced') {
+              setLockedZAtPlacement(decoded.args.lockedZ)
+            }
+          } catch {
+            // skip unrelated logs
+          }
+        }
+      }
+      if (txHash) setSuccessTxHash(txHash)
+      setStep('success')
+      setPendingCallsId(null)
+      refetchBalance()
+    } else if (callsStatus.status === 'failure') {
+      setStep('error')
+      setErrorMessage('Bet transaction failed on-chain.')
+      setPendingCallsId(null)
+    }
+  }, [callsStatus, pendingCallsId, refetchBalance])
+
   async function handleSubmit() {
-    if (!address || !publicClient || stakeBigInt === null || totalCost === null || side === null) return
+    if (!address || stakeBigInt === null || totalCost === null || side === null) return
     setErrorMessage(null)
     setSuccessTxHash(null)
+
+    if (isSmartWallet) {
+      try {
+        setStep('awaiting_batch_signature')
+
+        const approveCalldata = encodeFunctionData({
+          abi: erc20Abi,
+          functionName: 'approve',
+          args: [marketAddress, MAX_UINT256],
+        })
+        const betCalldata = encodeFunctionData({
+          abi: marketAbi,
+          functionName: 'placeBet',
+          args: [side === 'home', stakeBigInt],
+        })
+        const paymasterUrl = process.env.NEXT_PUBLIC_PAYMASTER_URL
+
+        const { id } = await sendCallsAsync({
+          calls: [
+            { to: USDC_ADDRESS, data: approveCalldata },
+            { to: marketAddress, data: betCalldata },
+          ],
+          ...(paymasterUrl ? { capabilities: { paymasterService: { url: paymasterUrl } } } : {}),
+        })
+
+        setStep('confirming_batch')
+        setPendingCallsId(id)
+      } catch (err) {
+        console.error('sendCalls failed:', err)
+        setStep('error')
+        setErrorMessage(describeError(err))
+      }
+      return
+    }
+
+    if (!publicClient) return
 
     try {
       setStep('awaiting_approval_signature')
@@ -201,14 +305,14 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
           address: USDC_ADDRESS,
           abi: erc20Abi,
           functionName: 'approve',
-          args: [marketAddress, totalCost],
+          args: [marketAddress, MAX_UINT256],
           account: address,
         })
         const approveHash = await writeContractAsync({
           address: USDC_ADDRESS,
           abi: erc20Abi,
           functionName: 'approve',
-          args: [marketAddress, totalCost],
+          args: [marketAddress, MAX_UINT256],
           gas: withGasBuffer(approveGasEstimate),
         })
         setStep('confirming_approval')
@@ -446,14 +550,21 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
           Place another bet
         </button>
       ) : (
-        <button
-          type="button"
-          onClick={handleSubmit}
-          disabled={!canSubmit}
-          className="btn-gold w-full"
-        >
-          {busy ? STEP_LABEL[step] : 'Place bet'}
-        </button>
+        <div className="space-y-1.5">
+          <button
+            type="button"
+            onClick={handleSubmit}
+            disabled={!canSubmit}
+            className="btn-gold w-full"
+          >
+            {busy ? STEP_LABEL[step] : isSmartWallet ? 'Place bet (gasless)' : 'Place bet'}
+          </button>
+          {!isSmartWallet && (
+            <p className="text-[10px] text-white/30 text-center">
+              Connect a Coinbase Smart Wallet for one-tap gasless betting.
+            </p>
+          )}
+        </div>
       )}
     </div>
   )
