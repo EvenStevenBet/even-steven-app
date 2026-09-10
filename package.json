@@ -17,7 +17,8 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "viem": "^2.21.0",
-    "wagmi": "^2.14.0"
+    "wagmi": "^2.14.0",
+    "x402-next": "^1.2.0"
   },
   "devDependencies": {
     "@types/node": "^20",
