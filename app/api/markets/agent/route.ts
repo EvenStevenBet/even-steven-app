@@ -1,8 +1,9 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { serverPublicClient } from '@/lib/server-client'
 import { marketAbi, factoryAbi } from '@/lib/contracts'
 import { FACTORY_ADDRESS } from '@/lib/chain'
 import { formatZDisplay } from '@/lib/format'
+import { requirePayment } from '@/lib/x402-server'
 
 export const dynamic = 'force-dynamic'
 
@@ -36,7 +37,10 @@ type AgentMarketError = {
   error: string
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const paymentError = await requirePayment(request, '$0.05', 'Live on-chain snapshot of all open markets')
+  if (paymentError) return paymentError
+
   const openMarkets = await serverPublicClient.readContract({
     address: FACTORY_ADDRESS,
     abi: factoryAbi,

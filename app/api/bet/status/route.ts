@@ -3,10 +3,14 @@ import { isAddress } from 'viem'
 import { serverPublicClient } from '@/lib/server-client'
 import { marketAbi } from '@/lib/contracts'
 import { formatZDisplay } from '@/lib/format'
+import { requirePayment } from '@/lib/x402-server'
 
 export const dynamic = 'force-dynamic'
 
 export async function GET(request: NextRequest) {
+  const paymentError = await requirePayment(request, '$0.01', 'Bet positions for a bettor on a market')
+  if (paymentError) return paymentError
+
   const { searchParams } = new URL(request.url)
   const marketAddressParam = searchParams.get('marketAddress')
   const bettorParam = searchParams.get('bettor')

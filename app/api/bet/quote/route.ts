@@ -4,6 +4,7 @@ import { serverPublicClient } from '@/lib/server-client'
 import { marketAbi, factoryAbi } from '@/lib/contracts'
 import { FACTORY_ADDRESS } from '@/lib/chain'
 import { formatZDisplay } from '@/lib/format'
+import { requirePayment } from '@/lib/x402-server'
 
 export const dynamic = 'force-dynamic'
 
@@ -11,6 +12,9 @@ const FEE_PERCENT = BigInt(200) // bps — matches SportsbookMarket.FEE_PERCENT 
 const MIN_STAKE = BigInt(1_000_000) // 1 USDC, 6 decimals
 
 export async function GET(request: NextRequest) {
+  const paymentError = await requirePayment(request, '$0.01', 'EV quote for a gameId/side/stake')
+  if (paymentError) return paymentError
+
   const { searchParams } = new URL(request.url)
   const gameId = searchParams.get('gameId')
   const side = searchParams.get('side')
