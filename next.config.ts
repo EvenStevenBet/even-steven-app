@@ -23,6 +23,16 @@ const nextConfig: NextConfig = {
       },
     ]
   },
+  // Optional peer deps pulled in transitively (@metamask/sdk -> @react-native-async-storage,
+  // pino -> pino-pretty) that don't exist in a web build and shouldn't block it.
+  webpack: config => {
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      '@react-native-async-storage/async-storage': false,
+      'pino-pretty': false,
+    }
+    return config
+  },
 }
 
 export default nextConfig
