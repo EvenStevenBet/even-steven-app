@@ -1,8 +1,10 @@
 import Link from 'next/link'
 import { MarketCard } from '@/components/MarketCard'
 import { TrustStrip } from '@/components/TrustStrip'
-import { enrichMarket } from '@/lib/markets'
-import type { MarketRow } from '@/lib/markets'
+import { enrichMarket, isBettingOpen } from '@/lib/markets'
+import type { MarketRow, ParsedMarket } from '@/lib/markets'
+import { serverPublicClient } from '@/lib/server-client'
+import { marketAbi } from '@/lib/contracts'
 
 export const revalidate = 60
 
@@ -21,6 +23,28 @@ async function getMarkets() {
   }
 }
 
+// The sheet's status column is editorial and can lag on-chain reality (e.g.
+// closeBetting() was called but nobody updated the sheet row). bettingOpen()
+// on the contract itself is the ground truth, so live markets get a final
+// on-chain check before being shown. A failed read is treated as closed —
+// never show a bet slip for a market we couldn't confirm is open.
+async function filterOpenOnChain(markets: ParsedMarket[]): Promise<ParsedMarket[]> {
+  if (markets.length === 0) return markets
+
+  try {
+    const results = await serverPublicClient.multicall({
+      contracts: markets.map(
+        m => ({ address: m.marketAddress as `0x${string}`, abi: marketAbi, functionName: 'bettingOpen' }) as const
+      ),
+      allowFailure: true,
+    })
+    return markets.filter((_, i) => results[i].status === 'success' && results[i].result === true)
+  } catch (err) {
+    console.error('[homepage] on-chain bettingOpen check failed:', err)
+    return []
+  }
+}
+
 const HIDDEN_UNTIL_UMA_FIX = [
   'NFL-2026-08-22-HOME-Lions-AWAY-Commanders',
   'NFL-2026-08-23-HOME-Titans-AWAY-Seahawks',
@@ -28,7 +52,10 @@ const HIDDEN_UNTIL_UMA_FIX = [
 
 export default async function HomePage() {
   const allMarkets = await getMarkets()
-  const markets = allMarkets.filter(m => m.isLive && !HIDDEN_UNTIL_UMA_FIX.includes(m.gameId))
+  const eligible = allMarkets.filter(
+    m => m.isLive && isBettingOpen(m) && !HIDDEN_UNTIL_UMA_FIX.includes(m.gameId)
+  )
+  const markets = await filterOpenOnChain(eligible)
   const hasMarkets = markets.length > 0
 
   return (

@@ -7,7 +7,7 @@ export interface MarketRow {
   homeTeam: string
   awayTeam: string
   gameDate: string       // ISO date string e.g. "2026-09-06"
-  status: string         // "active" | "coming-soon" | "settled" | etc. (sheet-managed)
+  status: string         // "open" | "closed" | "settled" | "cancelled" | "refund" | "coming_soon" | "expired" (sheet-managed)
   marketAddress: string  // empty = coming-soon; populated = live contract
   openLine: string       // display fallback only; chain wins on conflict
   bettingOpensAt: string // ISO date or human string
@@ -53,6 +53,15 @@ export function formatLine(zValue: number): string {
   if (zValue === 0) return 'PK'
   const val = zValue / 10000
   return val > 0 ? `+${val.toFixed(1)}` : val.toFixed(1)
+}
+
+// The sheet is the editorial source for homepage listing, but its status
+// column can lag the on-chain state (e.g. closeBetting() was called but
+// nobody flipped the sheet). Only "open" means betting is currently open —
+// treat everything else (closed, settled, cancelled, refund, expired,
+// coming_soon, blank) as not open.
+export function isBettingOpen(row: MarketRow): boolean {
+  return row.status?.trim().toLowerCase() === 'open'
 }
 
 export function enrichMarket(row: MarketRow): ParsedMarket {
