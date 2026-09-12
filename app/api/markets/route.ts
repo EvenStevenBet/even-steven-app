@@ -3,11 +3,11 @@ import Papa from 'papaparse'
 import type { MarketRow } from '@/lib/markets'
 import fallbackData from '@/data/markets.json'
 
-// Revalidate every 60 seconds — sheet updates are reflected within a minute
+// Revalidate every 60 seconds — CSV updates are reflected within a minute
 export const revalidate = 60
 
 export async function GET() {
-  const csvUrl = process.env.NEXT_PUBLIC_SHEET_CSV_URL
+  const csvUrl = process.env.NEXT_PUBLIC_MARKETS_CSV_URL
 
   if (!csvUrl) {
     return NextResponse.json(fallbackData)
@@ -19,7 +19,7 @@ export async function GET() {
       headers: { Accept: 'text/csv' },
     })
 
-    if (!res.ok) throw new Error(`Sheet fetch failed: ${res.status}`)
+    if (!res.ok) throw new Error(`CSV fetch failed: ${res.status}`)
 
     const text = await res.text()
     const { data, errors } = Papa.parse<MarketRow>(text, {

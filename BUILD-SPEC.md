@@ -39,7 +39,7 @@ NEXT_PUBLIC_FACTORY_ADDRESS=        # mainnet: 0x9E9C769aaCa509cD67Fbca2236dB26d
 NEXT_PUBLIC_USDC_ADDRESS=           # mainnet: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
 NEXT_PUBLIC_ALCHEMY_KEY=
 NEXT_PUBLIC_PAYMASTER_URL=          # Coinbase Developer Platform paymaster endpoint
-NEXT_PUBLIC_SHEET_CSV_URL=          # published Google Sheet CSV
+NEXT_PUBLIC_MARKETS_CSV_URL=        # raw GitHub CSV, written by market-opener-bot
 NEXT_PUBLIC_APP_URL=                # canonical deployed URL, for share links + manifest
 ```
 
