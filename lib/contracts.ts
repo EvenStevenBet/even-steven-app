@@ -9,6 +9,10 @@ export const marketAbi = parseAbi([
   'function getMarketEV(uint256 stake, bool greaterThan) view returns (uint256 currentPayout, uint256 liquidPayout, uint256 impliedVig)',
   'function bettingOpen() view returns (bool)',
   'function getMarketState() view returns (string _gameId, int256 z, uint256 gPool, uint256 lePool, uint256 tPool, bool isOpen, bool isSettled)',
+  // Aggregate seed (2 × PROTOCOL_SEED). It counts toward the odds denominator
+  // but is excluded from the distributable pool, so the displayed pool size
+  // subtracts it — otherwise a brand-new market looks like it holds $2.
+  'function protocolSeedTotal() view returns (uint256)',
   'event BetPlaced(address indexed bettor, uint256 indexed betId, uint256 stake, uint256 fee, bool greaterThan, int256 lockedZ)',
   // Server-side view functions (agent API) — signatures confirmed against
   // SportsbookMarket-v1_9.sol. getBetsByAddress/getBet wrap the public

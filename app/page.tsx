@@ -5,6 +5,7 @@ import { enrichMarket, isBettingOpen } from '@/lib/markets'
 import type { MarketRow, ParsedMarket } from '@/lib/markets'
 import { serverPublicClient } from '@/lib/server-client'
 import { marketAbi } from '@/lib/contracts'
+import { stakedPool } from '@/lib/pool'
 
 export const revalidate = 60
 
@@ -23,24 +24,52 @@ async function getMarkets() {
   }
 }
 
+interface OpenMarket {
+  market: ParsedMarket
+  currentZ: bigint
+  /** Real bettor stakes, seed excluded. */
+  staked: bigint
+}
+
 // The sheet's status column is editorial and can lag on-chain reality (e.g.
-// closeBetting() was called but nobody updated the sheet row). bettingOpen()
-// on the contract itself is the ground truth, so live markets get a final
-// on-chain check before being shown. A failed read is treated as closed —
-// never show a bet slip for a market we couldn't confirm is open.
-async function filterOpenOnChain(markets: ParsedMarket[]): Promise<ParsedMarket[]> {
-  if (markets.length === 0) return markets
+// closeBetting() was called but nobody updated the sheet row). The contract
+// itself is the ground truth, so live markets get a final on-chain check before
+// being shown. A failed read is treated as closed — never show a bet slip for a
+// market we couldn't confirm is open.
+//
+// getMarketState carries three facts in one call: isOpen for the filter, the
+// currentZ the card displays, and totalPool. The seed comes alongside it so the
+// card's pool figure counts only real stakes. Homepage line and bet slip line
+// come from the same read rather than drifting apart.
+async function readOpenOnChain(markets: ParsedMarket[]): Promise<OpenMarket[]> {
+  if (markets.length === 0) return []
 
   try {
     const results = await serverPublicClient.multicall({
-      contracts: markets.map(
-        m => ({ address: m.marketAddress as `0x${string}`, abi: marketAbi, functionName: 'bettingOpen' }) as const
-      ),
+      contracts: markets.flatMap(m => {
+        const address = m.marketAddress as `0x${string}`
+        return [
+          { address, abi: marketAbi, functionName: 'getMarketState' },
+          { address, abi: marketAbi, functionName: 'protocolSeedTotal' },
+        ] as const
+      }),
       allowFailure: true,
     })
-    return markets.filter((_, i) => results[i].status === 'success' && results[i].result === true)
+
+    const open: OpenMarket[] = []
+    markets.forEach((market, i) => {
+      const stateResult = results[i * 2]
+      const seedResult = results[i * 2 + 1]
+      if (stateResult.status !== 'success' || seedResult.status !== 'success') return
+      const [, currentZ, , , totalPool, isOpen] = stateResult.result as readonly [
+        string, bigint, bigint, bigint, bigint, boolean, boolean,
+      ]
+      if (!isOpen) return
+      open.push({ market, currentZ, staked: stakedPool(totalPool, seedResult.result as bigint) })
+    })
+    return open
   } catch (err) {
-    console.error('[homepage] on-chain bettingOpen check failed:', err)
+    console.error('[homepage] on-chain market state check failed:', err)
     return []
   }
 }
@@ -55,7 +84,7 @@ export default async function HomePage() {
   const eligible = allMarkets.filter(
     m => m.isLive && isBettingOpen(m) && !HIDDEN_UNTIL_UMA_FIX.includes(m.gameId)
   )
-  const markets = await filterOpenOnChain(eligible)
+  const markets = await readOpenOnChain(eligible)
   const hasMarkets = markets.length > 0
 
   return (
@@ -81,8 +110,8 @@ export default async function HomePage() {
           <>
             <h2 className="sr-only">Markets</h2>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {markets.map(m => (
-                <MarketCard key={m.gameId} market={m} />
+              {markets.map(({ market, currentZ, staked }) => (
+                <MarketCard key={market.gameId} market={market} currentZ={currentZ} staked={staked} />
               ))}
             </div>
           </>

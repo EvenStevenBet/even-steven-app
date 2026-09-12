@@ -48,12 +48,9 @@ export function parseGameId(gameId: string): Omit<ParsedMarket, keyof MarketRow 
   }
 }
 
-// Z values are 4-decimal fixed-point: -35000 = -3.5, 0 = PK
-export function formatLine(zValue: number): string {
-  if (zValue === 0) return 'PK'
-  const val = zValue / 10000
-  return val > 0 ? `+${val.toFixed(1)}` : val.toFixed(1)
-}
+// Line display and win conditions live in lib/line.ts. Formatting raw Z here
+// would quote it without a team attached and without the −z sign convention —
+// a second, subtly wrong formatter is how the outcome text drifts.
 
 // The sheet is the editorial source for homepage listing, but its status
 // column can lag the on-chain state (e.g. closeBetting() was called but

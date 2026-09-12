@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { BaseError, decodeEventLog, encodeFunctionData, formatUnits, parseUnits } from 'viem'
+import { BaseError, decodeEventLog, encodeFunctionData, parseUnits } from 'viem'
 import {
   useAccount,
   useCallsStatus,
@@ -14,11 +14,28 @@ import {
 import { USDC_ADDRESS, BASESCAN_URL } from '@/lib/chain'
 import { marketAbi, erc20Abi } from '@/lib/contracts'
 import { useIsSmartWallet } from '@/lib/useSmartWallet'
+import { formatStakeToPayout, formatUsdc } from '@/lib/format'
+import { favoriteHeadline, formatSpread, lineSentence, outcomeText } from '@/lib/line'
+import type { Side } from '@/lib/line'
+import { isFirstMoverMarket, stakedPool } from '@/lib/pool'
+import { Countdown } from '@/components/Countdown'
+import { FirstMoverBadge } from '@/components/FirstMoverBadge'
 
 const MIN_STAKE = BigInt(1_000_000) // 1 USDC, 6 decimals
 const FEE_BPS = BigInt(200)         // 2% — matches FEE_PERCENT on-chain (CLAUDE.md)
+// Same reference stake the x402 agent endpoint quotes at, so a human reading
+// the slip and an agent reading /api/markets/agent see identical numbers.
+const REFERENCE_STAKE = BigInt(100_000_000) // 100 USDC
+// The line moves on other people's bets, not just the reader's typing, so a
+// slip left sitting open goes stale on its own. Poll while betting is open.
+// Human-UI only: agents read getMarketEV directly before every bet.
+const POLL_MS = 15_000
 // Circle USDC on Base requires max approval — exact amounts fail intermittently (CLAUDE.md).
 const MAX_UINT256 = (BigInt(1) << BigInt(256)) - BigInt(1)
+
+// Turning a dead end into a step: both destinations verified to resolve.
+const BRIDGE_URL = 'https://bridge.base.org/deposit'
+const SWAP_URL = `https://app.uniswap.org/swap?chain=base&outputCurrency=${USDC_ADDRESS}`
 
 // Wallets' built-in gas estimation has been observed returning wildly
 // inflated values (~140M gas, near a full block) for these calls, which RPC
@@ -35,6 +52,8 @@ interface Props {
   marketAddress: `0x${string}`
   homeTeam: string
   awayTeam: string
+  /** Kickoff from the market CSV's gameDate column — drives the close countdown. */
+  closesAt?: string
 }
 
 type Step =
@@ -60,7 +79,8 @@ const STEP_LABEL: Record<Step, string> = {
   error: 'Something went wrong.',
 }
 
-// Debounced so simulatePayout/getMarketEV don't refetch on every keystroke.
+// Debounced so the EV / market-state reads don't refetch on every keystroke —
+// typing "1000" would otherwise fire four rounds of RPC calls.
 function useDebouncedValue<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value)
   useEffect(() => {
@@ -78,24 +98,10 @@ function describeError(err: unknown): string {
   return err instanceof Error ? err.message : 'Something went wrong.'
 }
 
-function fmtUsdc(raw: bigint | undefined): string {
-  if (raw === undefined) return '—'
-  return Number(formatUnits(raw, 6)).toLocaleString('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })
-}
+// getMarketEV returns (currentPayout, liquidPayout, impliedVig).
+type EvTuple = readonly [bigint, bigint, bigint]
 
-function fmtSpread(z: bigint): string {
-  const n = Number(z) / 10000
-  if (n === 0) return 'PK' // pick'em
-  const sign = n > 0 ? '+' : ''
-  // Show one decimal only if needed (e.g. -3.5, not -3.0)
-  const formatted = Number.isInteger(n) ? `${sign}${n}` : `${sign}${n.toFixed(1)}`
-  return formatted
-}
-
-export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
+export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) {
   const { address, isConnected } = useAccount()
   const publicClient = usePublicClient()
   const { writeContractAsync } = useWriteContract()
@@ -103,12 +109,13 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
   const isSmartWallet = useIsSmartWallet()
   const { sendCallsAsync } = useSendCalls()
 
-  const [side, setSide] = useState<'home' | 'away' | null>(null)
+  const [side, setSide] = useState<Side | null>(null)
   const [stakeInput, setStakeInput] = useState('')
   const [step, setStep] = useState<Step>('idle')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [successTxHash, setSuccessTxHash] = useState<`0x${string}` | null>(null)
   const [lockedZAtPlacement, setLockedZAtPlacement] = useState<bigint | null>(null)
+  const [sideAtPlacement, setSideAtPlacement] = useState<Side | null>(null)
   const [pendingCallsId, setPendingCallsId] = useState<string | null>(null)
 
   // A different wallet connecting (or the same wallet reconnecting) should not
@@ -122,6 +129,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
     setErrorMessage(null)
     setSuccessTxHash(null)
     setLockedZAtPlacement(null)
+    setSideAtPlacement(null)
     setPendingCallsId(null)
   }, [address])
 
@@ -149,22 +157,52 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
   const totalCost = stakeBigInt !== null && fee !== null ? stakeBigInt + fee : null
 
   const debouncedStake = useDebouncedValue(stakeBigInt, 350)
+  const hasRealStake = debouncedStake !== null && debouncedStake >= MIN_STAKE
+  // Pre-stake the buttons quote the 100 USDC reference; once a real stake is
+  // entered every figure recomputes against it.
+  const quoteStake = hasRealStake ? debouncedStake : REFERENCE_STAKE
 
-  const { data: bettingOpen, isLoading: bettingOpenLoading } = useReadContract({
-    address: marketAddress,
-    abi: marketAbi,
-    functionName: 'bettingOpen',
-  })
-
-  const { data: marketState, isLoading: marketStateLoading } = useReadContract({
+  const {
+    data: marketState,
+    isLoading: marketStateLoading,
+    refetch: refetchMarketState,
+  } = useReadContract({
     address: marketAddress,
     abi: marketAbi,
     functionName: 'getMarketState',
+    // Undefined on the very first render, so the market polls until it has told
+    // us it is closed, then stops. react-query clears the timer on unmount.
+    query: { refetchInterval: (query) => (query.state.data?.[5] === false ? false : POLL_MS) },
   })
 
-  // currentZ is the second return value (index 1), int256, 4-decimal fixed-point
-  // Derive bettingOpenFromState as a fallback — the existing bettingOpen call still runs
-  const currentZ: bigint | undefined = marketState ? (marketState as readonly [string, bigint, bigint, bigint, bigint, boolean, boolean])[1] : undefined
+  // getMarketState returns (gameId, z, gPool, lePool, tPool, isOpen, isSettled).
+  const currentZ: bigint | undefined = marketState?.[1]
+  const totalPool: bigint | undefined = marketState?.[4]
+  const bettingOpen: boolean | undefined = marketState?.[5]
+
+  // currentZ moves with every bet, so the line on screen goes stale while the
+  // slip is open. Refetch it alongside the EV reads — on the debounced stake,
+  // never on raw keystrokes.
+  useEffect(() => {
+    if (debouncedStake === null) return
+    refetchMarketState()
+  }, [debouncedStake, refetchMarketState])
+
+  // Fixed at openMarket() and never written again, so it needs no polling —
+  // but it is read rather than assumed, because the pool figure is only honest
+  // if the seed being subtracted is the seed the contract actually holds.
+  const { data: protocolSeedTotal } = useReadContract({
+    address: marketAddress,
+    abi: marketAbi,
+    functionName: 'protocolSeedTotal',
+    query: { staleTime: Infinity },
+  })
+
+  const staked =
+    totalPool !== undefined && protocolSeedTotal !== undefined
+      ? stakedPool(totalPool, protocolSeedTotal)
+      : undefined
+  const firstMover = isFirstMoverMarket(staked)
 
   const { data: usdcBalance, refetch: refetchBalance } = useReadContract({
     address: USDC_ADDRESS,
@@ -174,25 +212,31 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
     query: { enabled: Boolean(address) },
   })
 
-  const simulateEnabled =
-    side !== null && debouncedStake !== null && debouncedStake >= MIN_STAKE && bettingOpen === true
-
-  const { data: estimatedPayout, isFetching: payoutLoading } = useReadContract({
-    address: marketAddress,
-    abi: marketAbi,
-    functionName: 'simulatePayout',
-    args: debouncedStake !== null && side !== null ? [debouncedStake, side === 'home'] : undefined,
-    query: { enabled: simulateEnabled },
-  })
-
-  // Richer EV context (liquidPayout "at liquidity" figure, per CLAUDE.md naming).
-  const { data: evData } = useReadContract({
+  // Both sides are quoted at all times — the symmetric payout is the product.
+  // currentPayout here is the same expression simulatePayout() evaluates, so
+  // one read per side covers both scenario figures.
+  // quoteStake is the existing debounced value — polling reuses it rather than
+  // tracking a stake of its own, so a poll tick and a keystroke can't disagree
+  // about what is being quoted.
+  const evEnabled = bettingOpen === true
+  const evQuery = { enabled: evEnabled, refetchInterval: evEnabled ? POLL_MS : (false as const) }
+  const { data: homeEv } = useReadContract({
     address: marketAddress,
     abi: marketAbi,
     functionName: 'getMarketEV',
-    args: debouncedStake !== null && side !== null ? [debouncedStake, side === 'home'] : undefined,
-    query: { enabled: simulateEnabled },
+    args: [quoteStake, true],
+    query: evQuery,
   })
+  const { data: awayEv } = useReadContract({
+    address: marketAddress,
+    abi: marketAbi,
+    functionName: 'getMarketEV',
+    args: [quoteStake, false],
+    query: evQuery,
+  })
+
+  const evForSide = (s: Side): EvTuple | undefined => (s === 'home' ? homeEv : awayEv) as EvTuple | undefined
+  const selectedEv = side !== null ? evForSide(side) : undefined
 
   const insufficientBalance =
     Boolean(address) && usdcBalance !== undefined && totalCost !== null && usdcBalance < totalCost
@@ -221,6 +265,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
     setErrorMessage(null)
     setSuccessTxHash(null)
     setLockedZAtPlacement(null)
+    setSideAtPlacement(null)
     setPendingCallsId(null)
   }
 
@@ -254,17 +299,21 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
       setStep('success')
       setPendingCallsId(null)
       refetchBalance()
+      refetchMarketState()
     } else if (callsStatus.status === 'failure') {
       setStep('error')
       setErrorMessage('Bet transaction failed on-chain.')
       setPendingCallsId(null)
     }
-  }, [callsStatus, pendingCallsId, refetchBalance])
+  }, [callsStatus, pendingCallsId, refetchBalance, refetchMarketState])
 
   async function handleSubmit() {
     if (!address || stakeBigInt === null || totalCost === null || side === null) return
     setErrorMessage(null)
     setSuccessTxHash(null)
+    // Remembered because `side` is cleared on reset, and the confirmation has
+    // to describe the bet that was actually placed.
+    setSideAtPlacement(side)
 
     if (isSmartWallet) {
       try {
@@ -378,6 +427,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
       setSuccessTxHash(betHash)
       setStep('success')
       refetchBalance()
+      refetchMarketState()
     } catch (err) {
       console.error('placeBet failed:', err)
       setStep('error')
@@ -385,7 +435,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
     }
   }
 
-  if (bettingOpenLoading) {
+  if (marketStateLoading) {
     return (
       <div className="ticket p-6 space-y-4">
         <div className="eq-divider text-xs" aria-hidden>bet slip</div>
@@ -403,43 +453,45 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
     )
   }
 
+  const showBreakdown = stakeBigInt !== null && !belowMinimum && !stakeParseError
+
   return (
-    <div className="ticket p-6 space-y-5">
+    <div className="ticket p-4 xs:p-6 space-y-5">
       <div className="eq-divider text-xs" aria-hidden>bet slip</div>
 
-      {/* Current Z line — fetched from contract on load */}
-      <div className="flex items-center justify-between py-2 border-b border-white/10">
-        <span className="text-xs text-white/50 uppercase tracking-widest font-display">Current line</span>
-        <span className="font-display text-xl font-bold text-gold tabular">
-          {marketStateLoading || currentZ === undefined ? '—' : fmtSpread(currentZ)}
-        </span>
-      </div>
+      {/* Who the line belongs to — a bare "−2" doesn't say whose −2 it is. */}
+      <p className="text-center font-display text-base xs:text-lg font-bold tracking-wide text-gold">
+        {currentZ === undefined ? 'Line loading…' : favoriteHeadline(currentZ, homeTeam, awayTeam)}
+      </p>
 
-      {/* Side selection */}
+      {firstMover && (
+        <div className="flex justify-center">
+          <FirstMoverBadge />
+        </div>
+      )}
+
+      {/* Side selection — both sides quoted, so the symmetry is visible at a glance */}
       <div className="grid grid-cols-2 gap-2">
-        <button
-          type="button"
-          onClick={() => setSide('home')}
+        <SideButton
+          team={homeTeam}
+          side="home"
+          currentZ={currentZ}
+          quoteStake={quoteStake}
+          liquidPayout={(homeEv as EvTuple | undefined)?.[1]}
+          selected={side === 'home'}
           disabled={busy}
-          className={[
-            'py-3 px-2 rounded-md border text-sm font-display font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
-            side === 'home' ? 'border-gold bg-gold/10 text-gold' : 'border-white/10 text-white/70 hover:border-white/30',
-          ].join(' ')}
-        >
-          {homeTeam}
-        </button>
-        <button
-          type="button"
-          onClick={() => setSide('away')}
+          onSelect={() => setSide('home')}
+        />
+        <SideButton
+          team={awayTeam}
+          side="away"
+          currentZ={currentZ}
+          quoteStake={quoteStake}
+          liquidPayout={(awayEv as EvTuple | undefined)?.[1]}
+          selected={side === 'away'}
           disabled={busy}
-          className={[
-            'py-3 px-2 rounded-md border text-sm font-display font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
-            side === 'away' ? 'border-gold bg-gold/10 text-gold' : 'border-white/10 text-white/70 hover:border-white/30',
-          ].join(' ')}
-        >
-          {awayTeam}
-          <span className="block text-[10px] font-normal text-white/40 mt-0.5">or tie</span>
-        </button>
+          onSelect={() => setSide('away')}
+        />
       </div>
 
       {/* Stake input */}
@@ -462,50 +514,63 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
           <p className="mt-1 text-xs text-red-400">Minimum stake is 1 USDC.</p>
         )}
         {insufficientBalance && (
-          <p className="mt-1 text-xs text-red-400">
-            Insufficient USDC balance ({fmtUsdc(usdcBalance)} available).
-          </p>
+          <div className="mt-1 space-y-1">
+            <p className="text-xs text-red-400">
+              Insufficient USDC balance ({formatUsdc(usdcBalance)} available).
+            </p>
+            <p className="text-xs text-white/50">
+              <a href={BRIDGE_URL} target="_blank" rel="noopener noreferrer" className="text-gold underline underline-offset-2">
+                Bridge USDC to Base ↗
+              </a>
+              <span className="text-white/25"> · </span>
+              <a href={SWAP_URL} target="_blank" rel="noopener noreferrer" className="text-gold underline underline-offset-2">
+                Swap for USDC on Base ↗
+              </a>
+            </p>
+          </div>
         )}
       </div>
 
-      {/* Cost breakdown */}
-      {stakeBigInt !== null && !belowMinimum && (
+      {/* Cost breakdown — the 2% fee appears here, once, and nowhere else. */}
+      {showBreakdown && (
         <div className="text-xs text-white/50 space-y-1 tabular">
-          <div className="flex justify-between">
-            <span>Stake</span>
-            <span>{fmtUsdc(stakeBigInt)} USDC</span>
-          </div>
-          <div className="flex justify-between">
-            <span>Fee (2%)</span>
-            <span>{fmtUsdc(fee ?? undefined)} USDC</span>
-          </div>
-          <div className="flex justify-between text-white/80 font-semibold">
-            <span>Total to approve</span>
-            <span>{fmtUsdc(totalCost ?? undefined)} USDC</span>
-          </div>
+          <Row label="Stake" value={`${formatUsdc(stakeBigInt)} USDC`} />
+          <Row label="Fee (2%)" value={`${formatUsdc(fee)} USDC`} />
+          <Row label="Total to approve" value={`${formatUsdc(totalCost)} USDC`} emphasis />
         </div>
       )}
 
-      {/* Payout estimate — always from the contract, never computed here */}
-      {side !== null && stakeBigInt !== null && !belowMinimum && (
-        <div className="rounded-md border border-gold/20 bg-gold/5 px-3 py-2.5">
-          <p className="text-[10px] text-white/40 uppercase tracking-widest font-display">Estimated payout</p>
-          {payoutLoading ? (
-            <p className="text-sm text-white/40 mt-0.5">Calculating…</p>
-          ) : estimatedPayout !== undefined ? (
-            <>
-              <p className="text-xl font-display font-bold text-gold tabular mt-0.5">
-                {fmtUsdc(estimatedPayout)} USDC
-              </p>
-              {evData !== undefined && (
-                <p className="text-xs text-white/40 mt-0.5 tabular">{fmtUsdc(evData[1])} USDC at liquidity</p>
-              )}
-            </>
-          ) : (
-            <p className="text-sm text-white/40 mt-0.5">—</p>
-          )}
+      {/* Two scenarios, not current-vs-aspirational. In a thin pool the first
+          figure is legitimately near the stake because nobody has taken the
+          other side yet — as a scenario that reads as the floor case, where
+          labelling it "now" would make correct math look like a bad offer. */}
+      {showBreakdown && side !== null && (
+        <div className="rounded-md border border-gold/20 bg-gold/5 px-3 py-2.5 text-xs space-y-1 tabular">
+          <Row
+            label="If betting stopped now"
+            value={`${formatUsdc(selectedEv?.[0])} USDC`}
+            muted
+          />
+          <Row
+            label="If the pool balances"
+            value={`${formatUsdc(selectedEv?.[1])} USDC`}
+            emphasis
+          />
         </div>
       )}
+
+      {/* A promise, not a risk: the line can't move against you — and the other
+          half, because there is no cash-out and people arrive expecting one. */}
+      {side !== null && currentZ !== undefined && (
+        <p className="text-xs text-white/45 leading-relaxed">
+          Your line locks at{' '}
+          <span className="text-white/80 font-semibold tabular">{formatSpread(currentZ, side)}</span>{' '}
+          when you confirm. Later bets can&apos;t move it, and you can&apos;t change it — there is no
+          cash-out before the game settles.
+        </p>
+      )}
+
+      {closesAt && <Countdown closesAt={closesAt} className="text-xs text-white/50 tabular" />}
 
       {/* Step / status messaging */}
       {step !== 'idle' && STEP_LABEL[step] && (
@@ -519,6 +584,18 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
         </p>
       )}
       {step === 'error' && errorMessage && <p className="text-xs text-red-400/80">{errorMessage}</p>}
+
+      {/* Confirmation quotes lockedZ from the receipt — the line the bet
+          actually snapped at, which the current line may have already moved off. */}
+      {lockedZAtPlacement !== null && sideAtPlacement !== null && (
+        <div className="rounded-md border border-gold/30 bg-gold/5 px-3 py-2.5 space-y-1">
+          <p className="text-[10px] text-white/40 uppercase tracking-widest font-display">Your line</p>
+          <p className="text-sm text-white/85 leading-relaxed">
+            {lineSentence(lockedZAtPlacement, sideAtPlacement, homeTeam, awayTeam)}.
+          </p>
+        </div>
+      )}
+
       {step === 'success' && successTxHash && (
         <a
           href={`${BASESCAN_URL}/tx/${successTxHash}`}
@@ -528,11 +605,6 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
         >
           View transaction on BaseScan →
         </a>
-      )}
-      {lockedZAtPlacement !== null && (
-        <p className="text-xs text-white/50 tabular">
-          Your line locked at <span className="text-white/80 font-semibold">{fmtSpread(lockedZAtPlacement)}</span>
-        </p>
       )}
 
       {/* Submit / connect */}
@@ -581,5 +653,87 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam }: Props) {
         </div>
       )}
     </div>
+  )
+}
+
+function Row({
+  label,
+  value,
+  emphasis,
+  muted,
+}: {
+  label: string
+  value: string
+  emphasis?: boolean
+  muted?: boolean
+}) {
+  return (
+    <div className={['flex justify-between gap-3', emphasis ? 'text-white/85 font-semibold' : muted ? 'text-white/45' : ''].join(' ')}>
+      <span className="min-w-0">{label}</span>
+      <span className="shrink-0">{value}</span>
+    </div>
+  )
+}
+
+function SideButton({
+  team,
+  side,
+  currentZ,
+  quoteStake,
+  liquidPayout,
+  selected,
+  disabled,
+  onSelect,
+}: {
+  team: string
+  side: Side
+  currentZ: bigint | undefined
+  quoteStake: bigint
+  liquidPayout: bigint | undefined
+  selected: boolean
+  disabled: boolean
+  onSelect: () => void
+}) {
+  const quote = formatStakeToPayout(quoteStake, liquidPayout)
+
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      disabled={disabled}
+      aria-pressed={selected}
+      className={[
+        'flex flex-col gap-2 p-2.5 xs:p-3 rounded-md border text-left transition-colors',
+        'disabled:opacity-40 disabled:cursor-not-allowed',
+        selected ? 'border-gold bg-gold/10' : 'border-white/10 hover:border-white/30',
+      ].join(' ')}
+    >
+      <span className="flex items-baseline justify-between gap-1.5 flex-wrap">
+        <span
+          className={[
+            'font-display text-sm font-semibold leading-tight break-words',
+            selected ? 'text-gold' : 'text-white/80',
+          ].join(' ')}
+        >
+          {team}
+        </span>
+        <span className="font-display text-sm font-bold tabular shrink-0 text-gold">
+          {currentZ === undefined ? '—' : formatSpread(currentZ, side)}
+        </span>
+      </span>
+
+      {/* Derived from m = floor(z) + 1 on the raw contract integer — never from
+          the rounded spread above, and never hardcoded. */}
+      <span className="text-[11px] leading-snug text-white/55">
+        {currentZ === undefined ? '…' : outcomeText(currentZ, side)}
+      </span>
+
+      {/* Payout at liquidity, quoted on the STAKE. Identical on both sides —
+          that symmetry is the product, rendered as data. */}
+      <span className="text-[11px] tabular text-white/70 leading-snug">
+        <span className="whitespace-nowrap">{quote.stake}</span>{' '}
+        <span className="whitespace-nowrap">{quote.payout}</span>
+      </span>
+    </button>
   )
 }
