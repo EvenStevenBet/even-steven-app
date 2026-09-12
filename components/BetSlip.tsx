@@ -459,10 +459,16 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
     <div className="ticket p-4 xs:p-6 space-y-5">
       <div className="eq-divider text-xs" aria-hidden>bet slip</div>
 
-      {/* Who the line belongs to — a bare "−2" doesn't say whose −2 it is. */}
-      <p className="text-center font-display text-base xs:text-lg font-bold tracking-wide text-gold">
-        {currentZ === undefined ? 'Line loading…' : favoriteHeadline(currentZ, homeTeam, awayTeam)}
-      </p>
+      {/* Who the line belongs to — a bare "−2" doesn't say whose −2 it is.
+          Hidden once a bet has landed: this is the CURRENT line, which keeps
+          moving on other people's bets, while the "Your line" box below shows
+          the actual lockedZ from the receipt. Showing both invites reading the
+          (still-moving) current line as if it described the bet just placed. */}
+      {step !== 'success' && (
+        <p className="text-center font-display text-base xs:text-lg font-bold tracking-wide text-gold">
+          {currentZ === undefined ? 'Line loading…' : favoriteHeadline(currentZ, homeTeam, awayTeam)}
+        </p>
+      )}
 
       {firstMover && (
         <div className="flex justify-center">
@@ -543,8 +549,16 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
       {/* Two scenarios, not current-vs-aspirational. In a thin pool the first
           figure is legitimately near the stake because nobody has taken the
           other side yet — as a scenario that reads as the floor case, where
-          labelling it "now" would make correct math look like a bad offer. */}
-      {showBreakdown && side !== null && (
+          labelling it "now" would make correct math look like a bad offer.
+          Hidden once a bet has landed: getMarketEV always simulates ADDING
+          the queried stake on top of whatever pool it's called against. Once
+          the stake shown here is already the one that just landed, querying
+          it again asks "what if this same amount were bet a second time" —
+          not a stale number, just the wrong question. There's no view
+          function that reports what an already-placed bet is worth without
+          re-simulating a phantom extra stake, so we stop asking rather than
+          show a number that looks like a live payout and isn't one. */}
+      {showBreakdown && side !== null && step !== 'success' && (
         <div className="rounded-md border border-gold/20 bg-gold/5 px-3 py-2.5 text-xs space-y-1 tabular">
           <Row
             label="If betting stopped now"
