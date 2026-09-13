@@ -9,9 +9,9 @@ The #1 priority is distribution and conversion. Every decision below was made de
 
 ## 0. Hard rules — violations are bugs
 
-1. **Fee language.** The fee is a **2% taker fee on the stake, charged upfront at bet placement**. To bet $100 you pay $102: $100 stake + $2 fee. Only the stake enters the pool. At liquidity a $100 stake pays ~$200 gross on a win (~$98 net profit after fee). There is NO settlement fee, NO "4% friction," NO fee at claim time. If you encounter old docs or comments using settlement-fee framing, they are stale — the deployed v1.8.1 contract source is the only authority.
+1. **Fee language.** The fee is a **2% taker fee on the stake, charged upfront at bet placement**. To bet $100 you pay $102: $100 stake + $2 fee. Only the stake enters the pool. At liquidity a $100 stake pays **exactly** $200 gross on a win (**exactly** $98 net profit after fee) — this is exact, not an approximation a thin pool merely approaches. There is NO settlement fee, NO "4% friction," NO fee at claim time. If you encounter old docs or comments using settlement-fee framing, they are stale — the deployed v1.8.1 contract source is the only authority.
 2. **Never hand-write the ABI from memory.** Generate ABIs from the contract source files in this workspace: `SportsbookMarket-v1_8_1.sol` and `SportsbookFactory-v1_3.sol`. These match deployed bytecode.
-3. **Payout numbers shown to users must come from the contract** (`getMarketEV` / `simulatePayout`), never from math you reimplement client-side.
+3. **Payout numbers shown to users must be settlement-accurate.** Prefer the contract's own `getMarketEV`/`simulatePayout` over reimplementing math client-side — **except** for the one known case where those functions themselves are wrong: their denominator counts the 1 USDC protocol seed as a competing stake, under-quoting versus real settlement (worst on thin pools). `lib/payout.ts` (commit 4251c87) reimplements their exact formula with that one correction applied — use it instead of calling `getMarketEV`/`simulatePayout` directly. Do not reimplement payout math beyond that one documented fix.
 4. **No market-creation UI.** Do not build any interface that calls `createMarket` — deliberate omission (fee routing unresolved at contract level).
 5. **Read `CLAUDE.md` in this workspace before starting.** It is the canonical fact sheet (addresses, formats, conventions).
 6. Commit to git frequently — after each working milestone, not at the end.
@@ -98,8 +98,8 @@ Persistent header: logo (file `evenstevenlogogold.png` in workspace), nav (Marke
   - Stake: $100.00
   - Fee (2%): $2.00
   - **Total cost: $102.00**
-  - Payout if you win (at liquidity): ~$200.00 · (current: from `currentPayout`)
-  - **Net profit: ~$98.00**
+  - Payout if you win (at liquidity): $200.00 exactly · (current: from `currentPayout`)
+  - **Net profit: $98.00 exactly**
 - Show the locked line plainly: "Your line locks at −3.5 when you bet."
 - Place Bet button → Smart Wallet one-tap or EOA two-step per §5, with pending/confirmed/failed states and the Basescan tx link.
 - Post-bet confirmation includes the **Share** action (§7).

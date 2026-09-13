@@ -90,9 +90,9 @@ export default function HowItWorksPage() {
           <div className="border-t border-white/10 pt-2">
             <Row label="Total cost" value="$102.00" bold />
           </div>
-          <Row label="Gross payout at liquidity" value="~$200.00" className="text-gold" />
+          <Row label="Gross payout at liquidity" value="$200.00" className="text-gold" />
           <div className="border-t border-white/10 pt-2">
-            <Row label="Net profit" value="~$98.00" bold className="text-win" />
+            <Row label="Net profit" value="$98.00" bold className="text-win" />
           </div>
         </div>
 
@@ -643,12 +643,17 @@ address market = factory.marketByGameId("NFL-2026-01-15-HOME-Chiefs-AWAY-49ers")
 // Evaluate EV before betting (payouts are gross of the 2% placement fee)
 (
     uint256 currentPayout,  // gross return at current pool state
-    uint256 liquidPayout,   // gross return at balanced pools (~$200 on $100 stake)
+    uint256 liquidPayout,   // gross return at balanced pools — exactly $200 on $100 stake
     uint256 impliedVig      // protocol fee in bps — 200 = 2%
 ) = market.getMarketEV(stake, greaterThan);
+// Note: getMarketEV() as deployed slightly under-quotes (its denominator
+// counts the 1 USDC protocol seed as a competing stake) — worst on thin
+// pools, negligible on deep ones. Real settlement always pays exactly 2x
+// at balance. See AGENTS.md for the corrected formula; evensteven.bet's
+// own x402 endpoints already apply it server-side.
 
 // Kelly criterion note:
-// liquidPayout / stake = gross multiplier at liquidity (~2.0)
+// liquidPayout / stake = gross multiplier at liquidity (exactly 2.0 at balance, once corrected)
 // True cost basis     = stake * (1 + impliedVig / 10000)  // 2% fee on stake
 // Opportunity check   : currentPayout > liquidPayout → early imbalance favors you
 // Net EV              = (probability * currentPayout) - stake - (stake * impliedVig / 10000)`}</CodeBlock>
