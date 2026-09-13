@@ -105,9 +105,32 @@ export default async function MarketPage({ params }: Props) {
         </p>
       </header>
 
-      {/* Above the fold, above the slip: how real is this market, and when do
-          payouts land. "2.00× on a $6 pool" and "2.00× on a $60,000 pool" look
-          identical in the payout figures and are very different propositions. */}
+      {/* The bet slip is the primary action — it comes first, right after the
+          header. Pool size and settlement timing are supporting context, not
+          the reason someone opened this page, so they render below it. */}
+      {market.isLive ? (
+        <BetSlip
+          marketAddress={market.marketAddress as `0x${string}`}
+          homeTeam={market.parsedHome}
+          awayTeam={market.parsedAway}
+          closesAt={market.gameDate}
+        />
+      ) : (
+        <div className="ticket p-6 text-center space-y-3">
+          <p className="font-display text-xl font-semibold text-white/80">
+            Betting opens soon.
+          </p>
+          {formatMarketDate(market.bettingOpensAt, { month: 'long', day: 'numeric' }) && (
+            <p className="text-sm text-white/40 tabular">
+              Opens {formatMarketDate(market.bettingOpensAt, { month: 'long', day: 'numeric' })}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* How real is this market, and when do payouts land. "2.00× on a $6
+          pool" and "2.00× on a $60,000 pool" look identical in the payout
+          figures and are very different propositions. */}
       {market.isLive && (
         <section className="grid gap-3 sm:grid-cols-2">
           <div className="ticket p-4">
@@ -127,26 +150,6 @@ export default async function MarketPage({ params }: Props) {
             </p>
           </div>
         </section>
-      )}
-
-      {market.isLive ? (
-        <BetSlip
-          marketAddress={market.marketAddress as `0x${string}`}
-          homeTeam={market.parsedHome}
-          awayTeam={market.parsedAway}
-          closesAt={market.gameDate}
-        />
-      ) : (
-        <div className="ticket p-6 text-center space-y-3">
-          <p className="font-display text-xl font-semibold text-white/80">
-            Betting opens soon.
-          </p>
-          {formatMarketDate(market.bettingOpensAt, { month: 'long', day: 'numeric' }) && (
-            <p className="text-sm text-white/40 tabular">
-              Opens {formatMarketDate(market.bettingOpensAt, { month: 'long', day: 'numeric' })}
-            </p>
-          )}
-        </div>
       )}
 
     </main>

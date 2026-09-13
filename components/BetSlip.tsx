@@ -18,6 +18,7 @@ import { formatStakeToPayout, formatUsdc } from '@/lib/format'
 import { favoriteHeadline, formatSpread, lineSentence, outcomeText } from '@/lib/line'
 import type { Side } from '@/lib/line'
 import { isFirstMoverMarket, stakedPool } from '@/lib/pool'
+import { quoteMarketEV } from '@/lib/payout'
 import { Countdown } from '@/components/Countdown'
 import { FirstMoverBadge } from '@/components/FirstMoverBadge'
 
@@ -99,8 +100,6 @@ function describeError(err: unknown): string {
 }
 
 // getMarketEV returns (currentPayout, liquidPayout, impliedVig).
-type EvTuple = readonly [bigint, bigint, bigint]
-
 export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) {
   const { address, isConnected } = useAccount()
   const publicClient = usePublicClient()
@@ -177,6 +176,8 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
 
   // getMarketState returns (gameId, z, gPool, lePool, tPool, isOpen, isSettled).
   const currentZ: bigint | undefined = marketState?.[1]
+  const greaterPool: bigint | undefined = marketState?.[2]
+  const lessEqualPool: bigint | undefined = marketState?.[3]
   const totalPool: bigint | undefined = marketState?.[4]
   const bettingOpen: boolean | undefined = marketState?.[5]
 
@@ -213,29 +214,24 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
   })
 
   // Both sides are quoted at all times — the symmetric payout is the product.
-  // currentPayout here is the same expression simulatePayout() evaluates, so
-  // one read per side covers both scenario figures.
-  // quoteStake is the existing debounced value — polling reuses it rather than
-  // tracking a stake of its own, so a poll tick and a keystroke can't disagree
-  // about what is being quoted.
-  const evEnabled = bettingOpen === true
-  const evQuery = { enabled: evEnabled, refetchInterval: evEnabled ? POLL_MS : (false as const) }
-  const { data: homeEv } = useReadContract({
-    address: marketAddress,
-    abi: marketAbi,
-    functionName: 'getMarketEV',
-    args: [quoteStake, true],
-    query: evQuery,
-  })
-  const { data: awayEv } = useReadContract({
-    address: marketAddress,
-    abi: marketAbi,
-    functionName: 'getMarketEV',
-    args: [quoteStake, false],
-    query: evQuery,
-  })
+  // Computed here from raw pool state rather than calling the contract's own
+  // getMarketEV/simulatePayout: those simulate the stake correctly but divide
+  // by a winning-side denominator that still includes that side's
+  // PROTOCOL_SEED, while real settlement (_sumWinningStakes) never counts the
+  // seed — see lib/payout.ts. No extra RPC calls: this rides the same
+  // getMarketState poll already driving the header and pool figures.
+  const pool =
+    greaterPool !== undefined &&
+    lessEqualPool !== undefined &&
+    totalPool !== undefined &&
+    protocolSeedTotal !== undefined
+      ? { greaterPool, lessEqualPool, totalPool, protocolSeedTotal }
+      : undefined
 
-  const evForSide = (s: Side): EvTuple | undefined => (s === 'home' ? homeEv : awayEv) as EvTuple | undefined
+  const homeEv = pool ? quoteMarketEV(pool, quoteStake, true) : undefined
+  const awayEv = pool ? quoteMarketEV(pool, quoteStake, false) : undefined
+
+  const evForSide = (s: Side) => (s === 'home' ? homeEv : awayEv)
   const selectedEv = side !== null ? evForSide(side) : undefined
 
   const insufficientBalance =
@@ -483,7 +479,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
           side="home"
           currentZ={currentZ}
           quoteStake={quoteStake}
-          liquidPayout={(homeEv as EvTuple | undefined)?.[1]}
+          liquidPayout={homeEv?.liquidPayout}
           selected={side === 'home'}
           disabled={busy}
           onSelect={() => setSide('home')}
@@ -493,7 +489,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
           side="away"
           currentZ={currentZ}
           quoteStake={quoteStake}
-          liquidPayout={(awayEv as EvTuple | undefined)?.[1]}
+          liquidPayout={awayEv?.liquidPayout}
           selected={side === 'away'}
           disabled={busy}
           onSelect={() => setSide('away')}
@@ -562,26 +558,15 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
         <div className="rounded-md border border-gold/20 bg-gold/5 px-3 py-2.5 text-xs space-y-1 tabular">
           <Row
             label="If betting stopped now"
-            value={`${formatUsdc(selectedEv?.[0])} USDC`}
+            value={`${formatUsdc(selectedEv?.currentPayout)} USDC`}
             muted
           />
           <Row
             label="If the pool balances"
-            value={`${formatUsdc(selectedEv?.[1])} USDC`}
+            value={`${formatUsdc(selectedEv?.liquidPayout)} USDC`}
             emphasis
           />
         </div>
-      )}
-
-      {/* A promise, not a risk: the line can't move against you — and the other
-          half, because there is no cash-out and people arrive expecting one. */}
-      {side !== null && currentZ !== undefined && (
-        <p className="text-xs text-white/45 leading-relaxed">
-          Your line locks at{' '}
-          <span className="text-white/80 font-semibold tabular">{formatSpread(currentZ, side)}</span>{' '}
-          when you confirm. Later bets can&apos;t move it, and you can&apos;t change it — there is no
-          cash-out before the game settles.
-        </p>
       )}
 
       {closesAt && <Countdown closesAt={closesAt} className="text-xs text-white/50 tabular" />}
@@ -663,6 +648,20 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
             <p className="text-[10px] text-white/30 text-center">
               Connect a Coinbase Smart Wallet for one-tap gasless betting.
             </p>
+          )}
+          {/* A confirming note under the action, not a caveat before it — leads
+              with the benefit (the line is locked in your favor, not exposed to
+              line movement), with the no-cash-out disclosure kept separate and
+              neutral so it doesn't undercut that promise. */}
+          {side !== null && currentZ !== undefined && (
+            <div className="pt-1 text-center space-y-1">
+              <p className="text-xs text-white/60 leading-relaxed">
+                Your line locks in at{' '}
+                <span className="text-white/85 font-semibold tabular">{formatSpread(currentZ, side)}</span>{' '}
+                the moment you confirm — guaranteed, no matter how the market moves after.
+              </p>
+              <p className="text-[11px] text-white/35">No cash-out before the game settles.</p>
+            </div>
           )}
         </div>
       )}

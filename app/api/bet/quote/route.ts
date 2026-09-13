@@ -5,6 +5,7 @@ import { marketAbi, factoryAbi } from '@/lib/contracts'
 import { FACTORY_ADDRESS } from '@/lib/chain'
 import { formatZDisplay } from '@/lib/format'
 import { requirePayment } from '@/lib/x402-server'
+import { quoteMarketEV } from '@/lib/payout'
 
 export const dynamic = 'force-dynamic'
 
@@ -50,7 +51,7 @@ export async function GET(request: NextRequest) {
 
   const greaterThan = side === 'home'
 
-  const [state, ev] = await Promise.all([
+  const [state, protocolSeedTotal] = await Promise.all([
     serverPublicClient.readContract({
       address: marketAddress,
       abi: marketAbi,
@@ -59,17 +60,25 @@ export async function GET(request: NextRequest) {
     serverPublicClient.readContract({
       address: marketAddress,
       abi: marketAbi,
-      functionName: 'getMarketEV',
-      args: [stake, greaterThan],
+      functionName: 'protocolSeedTotal',
     }),
   ])
 
-  const [, currentZ, , , , isOpen] = state
+  const [, currentZ, greaterPool, lessEqualPool, totalPool, isOpen] = state
   if (!isOpen) {
     return NextResponse.json({ error: `market for gameId "${gameId}" is not open for betting` }, { status: 409 })
   }
 
-  const [currentPayout, liquidPayout, impliedVig] = ev
+  // Computed here rather than via the contract's own getMarketEV: that
+  // function's winning-side denominator still includes that side's
+  // PROTOCOL_SEED, while real settlement (_sumWinningStakes) never counts the
+  // seed as a competing stake — see lib/payout.ts.
+  const { currentPayout, liquidPayout } = quoteMarketEV(
+    { greaterPool, lessEqualPool, totalPool, protocolSeedTotal },
+    stake,
+    greaterThan,
+  )
+  const impliedVig = FEE_PERCENT
   const fee = (stake * FEE_PERCENT) / BigInt(10_000)
   const totalCost = stake + fee
 

@@ -4,10 +4,12 @@ import { marketAbi, factoryAbi } from '@/lib/contracts'
 import { FACTORY_ADDRESS } from '@/lib/chain'
 import { formatZDisplay } from '@/lib/format'
 import { requirePayment } from '@/lib/x402-server'
+import { quoteMarketEV } from '@/lib/payout'
 
 export const dynamic = 'force-dynamic'
 
 const REFERENCE_STAKE = BigInt(100_000_000) // 100 USDC (6 decimals)
+const FEE_PERCENT = BigInt(200) // bps — matches SportsbookMarket.FEE_PERCENT (2%)
 
 type EvSide = {
   currentPayout: string
@@ -50,37 +52,35 @@ export async function GET(request: NextRequest) {
   const stateContracts = openMarkets.map(
     marketAddress => ({ address: marketAddress, abi: marketAbi, functionName: 'getMarketState' }) as const
   )
-  const homeEvContracts = openMarkets.map(
-    marketAddress =>
-      ({ address: marketAddress, abi: marketAbi, functionName: 'getMarketEV', args: [REFERENCE_STAKE, true] }) as const
-  )
-  const awayEvContracts = openMarkets.map(
-    marketAddress =>
-      ({ address: marketAddress, abi: marketAbi, functionName: 'getMarketEV', args: [REFERENCE_STAKE, false] }) as const
+  const seedContracts = openMarkets.map(
+    marketAddress => ({ address: marketAddress, abi: marketAbi, functionName: 'protocolSeedTotal' }) as const
   )
 
-  const [stateResults, homeEvResults, awayEvResults] = await Promise.all([
+  const [stateResults, seedResults] = await Promise.all([
     serverPublicClient.multicall({ contracts: stateContracts, allowFailure: true }),
-    serverPublicClient.multicall({ contracts: homeEvContracts, allowFailure: true }),
-    serverPublicClient.multicall({ contracts: awayEvContracts, allowFailure: true }),
+    serverPublicClient.multicall({ contracts: seedContracts, allowFailure: true }),
   ])
 
+  // Computed here rather than via the contract's own getMarketEV: that
+  // function's winning-side denominator still includes that side's
+  // PROTOCOL_SEED, while real settlement (_sumWinningStakes) never counts the
+  // seed as a competing stake — see lib/payout.ts.
   const markets: (AgentMarket | AgentMarketError)[] = openMarkets.map((marketAddress, i) => {
     const stateResult = stateResults[i]
-    const homeEvResult = homeEvResults[i]
-    const awayEvResult = awayEvResults[i]
+    const seedResult = seedResults[i]
 
     if (stateResult.status === 'failure') {
       return { marketAddress, error: stateResult.error?.message ?? 'failed to read market state' }
     }
-    if (homeEvResult.status === 'failure' || awayEvResult.status === 'failure') {
-      const failed = homeEvResult.status === 'failure' ? homeEvResult : awayEvResult
-      return { marketAddress, error: failed.error?.message ?? 'failed to read market EV' }
+    if (seedResult.status === 'failure') {
+      return { marketAddress, error: seedResult.error?.message ?? 'failed to read protocol seed' }
     }
 
     const [gameId, z, gPool, lePool, tPool, isOpen, isSettled] = stateResult.result
-    const [homeCurrentPayout, homeLiquidPayout, homeImpliedVig] = homeEvResult.result
-    const [awayCurrentPayout, awayLiquidPayout, awayImpliedVig] = awayEvResult.result
+    const protocolSeedTotal = seedResult.result
+    const pool = { greaterPool: gPool, lessEqualPool: lePool, totalPool: tPool, protocolSeedTotal }
+    const home = quoteMarketEV(pool, REFERENCE_STAKE, true)
+    const away = quoteMarketEV(pool, REFERENCE_STAKE, false)
 
     return {
       marketAddress,
@@ -95,14 +95,14 @@ export async function GET(request: NextRequest) {
       ev: {
         referenceStake: REFERENCE_STAKE.toString(),
         home: {
-          currentPayout: homeCurrentPayout.toString(),
-          liquidPayout: homeLiquidPayout.toString(),
-          impliedVig: homeImpliedVig.toString(),
+          currentPayout: home.currentPayout.toString(),
+          liquidPayout: home.liquidPayout.toString(),
+          impliedVig: FEE_PERCENT.toString(),
         },
         away: {
-          currentPayout: awayCurrentPayout.toString(),
-          liquidPayout: awayLiquidPayout.toString(),
-          impliedVig: awayImpliedVig.toString(),
+          currentPayout: away.currentPayout.toString(),
+          liquidPayout: away.liquidPayout.toString(),
+          impliedVig: FEE_PERCENT.toString(),
         },
       },
     }
