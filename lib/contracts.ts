@@ -20,6 +20,19 @@ export const marketAbi = parseAbi([
   'struct Bet { address bettor; uint256 stake; bool greaterThan; int256 lockedZ; bool claimed; }',
   'function getBetsByAddress(address bettor) view returns (uint256[])',
   'function getBet(uint256 betId) view returns (Bet)',
+  // My Bets page (claim flow) — confirmed live against SportsbookMarket-v1_9.sol
+  // and the deployed test market. getMarketStatus() carries canceled/paused/
+  // assertion state; refundMode/finalSpread/cachedWinningStakes are auto-generated
+  // public-variable getters used to replicate _calculatePayout() client-side so a
+  // claimable bet's payout can be shown before the claim tx is sent.
+  'function getMarketStatus() view returns (bool isCanceled, bool isPaused, bool assertionActive, uint256 claimDeadline, uint256 betsRemaining)',
+  'function refundMode() view returns (bool)',
+  'function finalSpread() view returns (int256)',
+  'function cachedWinningStakes() view returns (uint256)',
+  'function totalPool() view returns (uint256)',
+  'function claimPayout(uint256 betId)',
+  'function claimAllPayouts()',
+  'event PayoutClaimed(address indexed bettor, uint256 amount)',
 ])
 
 export const erc20Abi = parseAbi([
