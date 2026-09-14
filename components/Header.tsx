@@ -4,18 +4,7 @@ import Link from 'next/link'
 import Image from 'next/image'
 import { usePathname } from 'next/navigation'
 import { useState } from 'react'
-import {
-  ConnectWallet,
-  Wallet,
-  WalletDropdown,
-  WalletDropdownDisconnect,
-} from '@coinbase/onchainkit/wallet'
-import {
-  Address,
-  Avatar,
-  Name,
-  Identity,
-} from '@coinbase/onchainkit/identity'
+import { ConnectWalletModal } from '@/components/ConnectWalletModal'
 
 const NAV = [
   { href: '/',             label: 'Markets' },
@@ -68,21 +57,9 @@ export function Header() {
         </nav>
 
         <div className="flex items-center gap-2">
-          {/* Wallet — OnchainKit handles Smart Wallet + EOA + WalletConnect */}
-          <Wallet>
-            <ConnectWallet>
-              <Avatar className="h-5 w-5" />
-              <Name />
-            </ConnectWallet>
-            <WalletDropdown>
-              <Identity className="px-4 pt-3 pb-2" hasCopyAddressOnClick>
-                <Avatar />
-                <Name />
-                <Address />
-              </Identity>
-              <WalletDropdownDisconnect />
-            </WalletDropdown>
-          </Wallet>
+          {/* Wallet — connect flow lists every configured connector (Coinbase,
+              MetaMask/injected, WalletConnect); connected state stays OnchainKit. */}
+          <ConnectWalletModal />
 
           {/* Mobile hamburger */}
           <button

@@ -4,12 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { BaseError } from 'viem'
 import { useAccount, usePublicClient, useWriteContract } from 'wagmi'
-import {
-  ConnectWallet,
-  Wallet,
-  WalletDropdown,
-  WalletDropdownDisconnect,
-} from '@coinbase/onchainkit/wallet'
+import { ConnectWalletModal } from '@/components/ConnectWalletModal'
 import { BASESCAN_URL } from '@/lib/chain'
 import { marketAbi } from '@/lib/contracts'
 import { enrichMarket } from '@/lib/markets'
@@ -159,12 +154,7 @@ export default function BetsPage() {
         <div className="space-y-4">
           <p className="text-white/60">Connect your wallet to view your bets.</p>
           <div className="flex justify-center">
-            <Wallet>
-              <ConnectWallet>Connect wallet</ConnectWallet>
-              <WalletDropdown>
-                <WalletDropdownDisconnect />
-              </WalletDropdown>
-            </Wallet>
+            <ConnectWalletModal />
           </div>
         </div>
       </main>
