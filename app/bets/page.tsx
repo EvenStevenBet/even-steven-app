@@ -12,7 +12,7 @@ import {
 } from '@coinbase/onchainkit/wallet'
 import { BASESCAN_URL } from '@/lib/chain'
 import { marketAbi } from '@/lib/contracts'
-import { enrichMarket, isBettingOpen } from '@/lib/markets'
+import { enrichMarket } from '@/lib/markets'
 import type { MarketRow, ParsedMarket } from '@/lib/markets'
 import { formatUsdc } from '@/lib/format'
 import { formatSpread, lineSentence } from '@/lib/line'
@@ -67,7 +67,7 @@ export default function BetsPage() {
     [markets]
   )
 
-  const { bets, loading, scannedCount, totalCount, markClaimed } = useWalletBets(
+  const { bets, loading, scannedCount, totalCount, markClaimed, errors } = useWalletBets(
     scannableMarkets,
     address,
     publicClient
@@ -184,16 +184,32 @@ export default function BetsPage() {
         )}
       </header>
 
+      {errors.length > 0 && (
+        <div className="rounded-md border border-red-400/30 bg-red-400/5 px-4 py-3 space-y-1">
+          <p className="text-sm text-red-400 font-semibold">
+            {errors.length === 1 ? "Couldn't load 1 market" : `Couldn't load ${errors.length} markets`}
+          </p>
+          {errors.map(({ market, message }) => (
+            <p key={market.marketAddress} className="text-xs text-red-400/70">
+              {market.parsedHome} vs {market.parsedAway}: {message}
+            </p>
+          ))}
+          <p className="text-xs text-white/40 pt-1">
+            This is separate from &quot;no bets found&quot; — bets on these markets may exist but couldn&apos;t be checked. Try refreshing.
+          </p>
+        </div>
+      )}
+
       {markets === null ? (
         <p className="text-center text-white/40 text-sm py-12">Loading markets…</p>
-      ) : !hasAnyBets && !loading ? (
+      ) : !hasAnyBets && !loading && errors.length === 0 ? (
         <div className="text-center py-16 space-y-4">
           <p className="text-white/50">No bets found for this wallet.</p>
           <Link href="/" className="btn-ghost text-sm inline-flex">
             ← Browse markets
           </Link>
         </div>
-      ) : (
+      ) : !hasAnyBets && !loading && errors.length > 0 ? null : (
         <>
           <Section title="Active" show={active.length > 0 || loading}>
             {active.map(bet => (

@@ -2,156 +2,54 @@
 //
 // Contract calls here were verified live against SportsbookMarket-v1_9.sol and
 // the deployed Chiefs/Eagles test market (0x4C67...c441C) before this file was
-// written:
-//   - BetPlaced's `bettor` param IS indexed, so logs can be filtered on-chain
-//     by wallet address instead of fetched in full and filtered client-side.
+// written, and confirmed again against production traffic when the first
+// version of this file broke it:
+//   - getBetsByAddress(bettor) returns a wallet's bet ids on one market in a
+//     SINGLE eth_call — no block-range scanning of any kind. This file used
+//     to discover bets via chunked eth_getLogs (filtered on the indexed
+//     `bettor` topic) instead; that shipped to production and produced a
+//     1000+-request storm within seconds. The proximate trigger was Alchemy's
+//     free-tier eth_getLogs cap — 10 blocks per call (not the 2,000-block cap
+//     the public Base RPC fallback has, which the chunking size was tuned
+//     for) — so bisecting a multi-day window down to that cap fanned out
+//     recursively. But the real bug was reaching for eth_getLogs at all when
+//     the contract already exposes a direct per-address getter that needs no
+//     block range whatsoever. Never reintroduce eth_getLogs here.
 //   - getBet(betId) returns the live Bet{bettor,stake,greaterThan,lockedZ,claimed}
 //     struct — field names/types match what's used below.
 //   - getMarketState()/getMarketStatus() tuples match what's decoded below.
-//   - eth_getLogs on the public Base RPC (used as a dev fallback — production
-//     uses Alchemy per lib/wagmi.ts) is capped at a 2,000-block range, which is
-//     why fetchBetLogs chunks/bisects instead of requesting one wide range.
 
 import type { Address, PublicClient } from 'viem'
-import { parseAbiItem } from 'viem'
 import { marketAbi } from '@/lib/contracts'
 import type { ParsedMarket } from '@/lib/markets'
-import { parseMarketDate } from '@/lib/format'
-
-const BET_PLACED_EVENT = parseAbiItem(
-  'event BetPlaced(address indexed bettor, uint256 indexed betId, uint256 stake, uint256 fee, bool greaterThan, int256 lockedZ)'
-)
-
-// Base block time is ~2s. BetPlaced can only fire while bettingOpen is true —
-// i.e. between openMarket() and closeBetting(), which per CLAUDE.md happens
-// at/around kickoff — so the log-scan window is bounded by the market's own
-// lifecycle, not by how long payouts stay claimable afterward (that's the
-// 90-day CLAIM_TIMEOUT, a completely different window that has nothing to do
-// with when a bet could have been *placed*). Getting this wrong by using the
-// claim window here (an earlier version of this file did) turns a scan that
-// should span hours-to-days into one spanning months — thousands of chunked
-// requests against a range-limited RPC instead of a handful.
-const BLOCK_TIME_SEC = 2
-// bettingOpensAt is the tight lower bound; this is only a fallback for a row
-// missing that column.
-const FALLBACK_LOOKBACK_BEFORE_GAME_DAYS = 7
-const LOOKAHEAD_AFTER_GAME_DAYS = 2 // closeBetting() happens at/near kickoff; small slack for late closes
-const FALLBACK_LOOKBACK_DAYS = 14 // used when neither bettingOpensAt nor gameDate parse
-const PUBLIC_RPC_CHUNK = BigInt(1_800) // stays under the public fallback's 2,000-block cap
-
-function approxBlockForTimestamp(
-  targetSec: number,
-  currentBlock: bigint,
-  currentSec: number,
-): bigint {
-  const deltaSec = currentSec - targetSec
-  const deltaBlocks = BigInt(Math.max(0, Math.round(deltaSec / BLOCK_TIME_SEC)))
-  return deltaBlocks > currentBlock ? BigInt(0) : currentBlock - deltaBlocks
-}
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-// Distinguishes "this range is too wide for the RPC" (worth bisecting) from
-// rate-limiting/transient failures (worth backing off on, NOT bisecting —
-// splitting a 429 into two parallel sub-requests turns one rate-limit hit
-// into a request storm, which is what happens if every error is treated the
-// same way).
-function isRangeLimitError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err)
-  return /range|-32614|block count|exceeds the range/i.test(msg)
-}
+// Circuit breaker for every RPC call in this file: bounded attempts with
+// exponential backoff, then throw — never retry forever, and never swallow a
+// real failure into a silent "no bets" result (the caller needs to be able to
+// tell "this market failed to load" apart from "this wallet has no bets on
+// it," or a transient RPC hiccup on production shows up as bets quietly
+// disappearing instead of a visible error).
+const MAX_ATTEMPTS = 3
+const BASE_BACKOFF_MS = 500
 
-const RATE_LIMIT_RETRIES = 4
-const RATE_LIMIT_BACKOFF_MS = 600
-
-async function scanRange(
-  client: PublicClient,
-  address: Address,
-  bettor: Address,
-  fromBlock: bigint,
-  toBlock: bigint,
-  rateLimitAttempt = 0,
-): Promise<readonly { args: { betId?: bigint; stake?: bigint; greaterThan?: boolean; lockedZ?: bigint } }[]> {
-  try {
-    return await client.getLogs({
-      address,
-      event: BET_PLACED_EVENT,
-      args: { bettor },
-      fromBlock,
-      toBlock,
-    })
-  } catch (err) {
-    if (!isRangeLimitError(err)) {
-      // Rate limit / transient network error: back off and retry the SAME
-      // range rather than splitting it into more concurrent requests.
-      if (rateLimitAttempt < RATE_LIMIT_RETRIES) {
-        await sleep(RATE_LIMIT_BACKOFF_MS * (rateLimitAttempt + 1))
-        return scanRange(client, address, bettor, fromBlock, toBlock, rateLimitAttempt + 1)
+async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
+  let lastErr: unknown
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    try {
+      return await fn()
+    } catch (err) {
+      lastErr = err
+      if (attempt < MAX_ATTEMPTS - 1) {
+        await sleep(BASE_BACKOFF_MS * 2 ** attempt) // 500ms, 1000ms
       }
-      console.error(`[bets] giving up on block range ${fromBlock}-${toBlock} after repeated failures:`, err)
-      return []
     }
-
-    if (toBlock <= fromBlock) return []
-    if (toBlock - fromBlock <= PUBLIC_RPC_CHUNK) {
-      // Already at (or under) the conservative chunk size and still hitting a
-      // range-limit error — nothing smaller to try, so give up on this slice.
-      return []
-    }
-    const mid = fromBlock + (toBlock - fromBlock) / BigInt(2)
-    // Sequential, not Promise.all: splitting a too-wide range is expected to
-    // happen rarely (only against the public-RPC dev fallback — Alchemy in
-    // production handles much wider ranges in one call), and firing every
-    // bisected half at once is exactly the fan-out that turns one slow
-    // endpoint into a self-inflicted rate-limit storm.
-    const left = await scanRange(client, address, bettor, fromBlock, mid)
-    const right = await scanRange(client, address, bettor, mid + BigInt(1), toBlock)
-    return [...left, ...right]
   }
-}
-
-export interface RawBetLog {
-  betId: bigint
-  stake: bigint
-  greaterThan: boolean
-  lockedZ: bigint
-}
-
-/** BetPlaced logs for one wallet on one market, filtered on-chain by indexed `bettor`. */
-export async function fetchBetLogs(
-  client: PublicClient,
-  marketAddress: Address,
-  bettor: Address,
-  gameDateIso: string | undefined,
-  bettingOpensAtIso: string | undefined,
-  currentBlock: bigint,
-  currentSec: number,
-): Promise<RawBetLog[]> {
-  const gameSec = (parseMarketDate(gameDateIso)?.getTime() ?? NaN) / 1000
-  const opensSec = (parseMarketDate(bettingOpensAtIso)?.getTime() ?? NaN) / 1000
-
-  let fromTargetSec: number
-  if (Number.isFinite(opensSec)) fromTargetSec = opensSec
-  else if (Number.isFinite(gameSec)) fromTargetSec = gameSec - FALLBACK_LOOKBACK_BEFORE_GAME_DAYS * 86400
-  else fromTargetSec = currentSec - FALLBACK_LOOKBACK_DAYS * 86400
-
-  const toTargetSec = Number.isFinite(gameSec) ? Math.min(currentSec, gameSec + LOOKAHEAD_AFTER_GAME_DAYS * 86400) : currentSec
-
-  const fromBlock = approxBlockForTimestamp(fromTargetSec, currentBlock, currentSec)
-  const toBlock =
-    toTargetSec >= currentSec ? currentBlock : approxBlockForTimestamp(toTargetSec, currentBlock, currentSec)
-
-  const logs = await scanRange(client, marketAddress, bettor, fromBlock, toBlock)
-  return logs
-    .filter(l => l.args.betId !== undefined)
-    .map(l => ({
-      betId: l.args.betId as bigint,
-      stake: l.args.stake as bigint,
-      greaterThan: l.args.greaterThan as boolean,
-      lockedZ: l.args.lockedZ as bigint,
-    }))
+  console.error(`[bets] ${label} failed after ${MAX_ATTEMPTS} attempts:`, lastErr)
+  throw lastErr
 }
 
 // ── Market snapshot + payout replication ───────────────────────────────────
@@ -172,21 +70,27 @@ export interface MarketSnapshot {
 export async function fetchMarketSnapshot(
   client: PublicClient,
   marketAddress: Address,
-): Promise<MarketSnapshot | null> {
-  const results = await client.multicall({
-    contracts: [
-      { address: marketAddress, abi: marketAbi, functionName: 'getMarketState' },
-      { address: marketAddress, abi: marketAbi, functionName: 'getMarketStatus' },
-      { address: marketAddress, abi: marketAbi, functionName: 'refundMode' },
-      { address: marketAddress, abi: marketAbi, functionName: 'finalSpread' },
-      { address: marketAddress, abi: marketAbi, functionName: 'cachedWinningStakes' },
-      { address: marketAddress, abi: marketAbi, functionName: 'protocolSeedTotal' },
-    ],
-    allowFailure: true,
-  })
+): Promise<MarketSnapshot> {
+  const results = await withRetry(
+    () =>
+      client.multicall({
+        contracts: [
+          { address: marketAddress, abi: marketAbi, functionName: 'getMarketState' },
+          { address: marketAddress, abi: marketAbi, functionName: 'getMarketStatus' },
+          { address: marketAddress, abi: marketAbi, functionName: 'refundMode' },
+          { address: marketAddress, abi: marketAbi, functionName: 'finalSpread' },
+          { address: marketAddress, abi: marketAbi, functionName: 'cachedWinningStakes' },
+          { address: marketAddress, abi: marketAbi, functionName: 'protocolSeedTotal' },
+        ],
+        allowFailure: true,
+      }),
+    `fetchMarketSnapshot(${marketAddress})`
+  )
 
   const [stateR, statusR, refundR, spreadR, winStakesR, seedR] = results
-  if (stateR.status !== 'success' || statusR.status !== 'success') return null
+  if (stateR.status !== 'success' || statusR.status !== 'success') {
+    throw new Error(`fetchMarketSnapshot(${marketAddress}): core reads failed`)
+  }
 
   const [gameId, currentZ, , , totalPool, bettingOpen, settled] = stateR.result as readonly [
     string, bigint, bigint, bigint, bigint, boolean, boolean,
@@ -207,30 +111,64 @@ export async function fetchMarketSnapshot(
   }
 }
 
-/** Live `claimed` flags for a set of bet ids on one market, via getBet(betId). */
-export async function fetchClaimedFlags(
+export interface RawBet {
+  betId: bigint
+  stake: bigint
+  greaterThan: boolean
+  lockedZ: bigint
+  claimed: boolean
+}
+
+/**
+ * A wallet's bets on one market — via getBetsByAddress(bettor) for the id
+ * list, then one multicall of getBet(id) for the full Bet struct (stake,
+ * side, lockedZ, claimed) per id. Two RPC round-trips total, regardless of
+ * how far back the market opened or how long ago it settled.
+ */
+export async function fetchWalletBets(
   client: PublicClient,
   marketAddress: Address,
-  betIds: bigint[],
-): Promise<Map<bigint, boolean>> {
-  if (betIds.length === 0) return new Map()
-  const results = await client.multicall({
-    contracts: betIds.map(betId => ({
-      address: marketAddress,
-      abi: marketAbi,
-      functionName: 'getBet' as const,
-      args: [betId] as const,
-    })),
-    allowFailure: true,
-  })
-  const map = new Map<bigint, boolean>()
+  bettor: Address,
+): Promise<RawBet[]> {
+  const betIds = await withRetry(
+    () =>
+      client.readContract({
+        address: marketAddress,
+        abi: marketAbi,
+        functionName: 'getBetsByAddress',
+        args: [bettor],
+      }),
+    `getBetsByAddress(${marketAddress})`
+  )
+  if (betIds.length === 0) return []
+
+  const results = await withRetry(
+    () =>
+      client.multicall({
+        contracts: betIds.map(betId => ({
+          address: marketAddress,
+          abi: marketAbi,
+          functionName: 'getBet' as const,
+          args: [betId] as const,
+        })),
+        allowFailure: true,
+      }),
+    `getBet×${betIds.length}(${marketAddress})`
+  )
+
+  const bets: RawBet[] = []
   results.forEach((r, i) => {
-    if (r.status === 'success') {
-      const bet = r.result as { claimed: boolean }
-      map.set(betIds[i], bet.claimed)
-    }
+    if (r.status !== 'success') return
+    const bet = r.result as { stake: bigint; greaterThan: boolean; lockedZ: bigint; claimed: boolean }
+    bets.push({
+      betId: betIds[i],
+      stake: bet.stake,
+      greaterThan: bet.greaterThan,
+      lockedZ: bet.lockedZ,
+      claimed: bet.claimed,
+    })
   })
-  return map
+  return bets
 }
 
 export type BetStatus = 'active' | 'awaiting' | 'claimable' | 'won' | 'lost' | 'refunded'
@@ -281,22 +219,20 @@ function calculatePayout(
 export function classifyBets(
   market: ParsedMarket,
   snapshot: MarketSnapshot,
-  logs: RawBetLog[],
-  claimedFlags: Map<bigint, boolean>,
+  rawBets: RawBet[],
 ): WalletBet[] {
   const finalized = snapshot.settled || snapshot.canceled
 
-  return logs.map(log => {
-    const side: 'home' | 'away' = log.greaterThan ? 'home' : 'away'
-    const claimed = claimedFlags.get(log.betId) ?? false
+  return rawBets.map(raw => {
+    const side: 'home' | 'away' = raw.greaterThan ? 'home' : 'away'
 
     if (!finalized) {
       return {
         market,
-        betId: log.betId,
+        betId: raw.betId,
         side,
-        stake: log.stake,
-        lockedZ: log.lockedZ,
+        stake: raw.stake,
+        lockedZ: raw.lockedZ,
         currentZ: snapshot.currentZ,
         status: snapshot.bettingOpen ? 'active' : 'awaiting',
         outcome: null,
@@ -305,25 +241,25 @@ export function classifyBets(
       }
     }
 
-    const { payout } = calculatePayout(log.stake, log.greaterThan, log.lockedZ, snapshot)
+    const { payout } = calculatePayout(raw.stake, raw.greaterThan, raw.lockedZ, snapshot)
     const outcome: BetOutcome = snapshot.refundMode ? 'refunded' : payout > BigInt(0) ? 'won' : 'lost'
 
     return {
       market,
-      betId: log.betId,
+      betId: raw.betId,
       side,
-      stake: log.stake,
-      lockedZ: log.lockedZ,
+      stake: raw.stake,
+      lockedZ: raw.lockedZ,
       currentZ: snapshot.currentZ,
       // Unclaimed + a nonzero payout (won or refund) is what actually shows in
       // the Claimable section; claimed or zero-payout (lost) bets go straight
       // to History — a losing bet's `claimed` flag never flips true on-chain
       // (claimPayout reverts before that write is committed), so it can only
       // ever land in History, never Claimable.
-      status: !claimed && payout > BigInt(0) ? 'claimable' : outcome,
+      status: !raw.claimed && payout > BigInt(0) ? 'claimable' : outcome,
       outcome,
       payout,
-      claimed,
+      claimed: raw.claimed,
     }
   })
 }

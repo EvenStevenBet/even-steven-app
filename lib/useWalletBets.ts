@@ -3,13 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Address, PublicClient } from 'viem'
 import type { ParsedMarket } from '@/lib/markets'
-import {
-  classifyBets,
-  fetchBetLogs,
-  fetchClaimedFlags,
-  fetchMarketSnapshot,
-  type WalletBet,
-} from '@/lib/bets'
+import { classifyBets, fetchMarketSnapshot, fetchWalletBets, type WalletBet } from '@/lib/bets'
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -22,14 +16,15 @@ export interface WalletBetsState {
   loading: boolean
   scannedCount: number
   totalCount: number
+  /** Markets whose scan failed after the retry budget in lib/bets.ts was exhausted — surfaced distinctly from "no bets found." */
+  errors: { market: ParsedMarket; message: string }[]
 }
 
 /**
- * Scans every live market in `markets` for `address`'s BetPlaced logs, one
- * market at a time, merging results into state as each market resolves rather
- * than waiting on the full set — a wallet with bets on an early market should
- * see them immediately instead of staring at a blank page until the slowest
- * market's log scan finishes.
+ * Scans every live market in `markets` for `address`'s bets via
+ * getBetsByAddress()/getBet() (see lib/bets.ts — no block-range log scanning),
+ * one market at a time, merging results into state as each market resolves
+ * rather than waiting on the full set.
  */
 export function useWalletBets(
   markets: ParsedMarket[],
@@ -37,6 +32,7 @@ export function useWalletBets(
   publicClient: PublicClient | undefined,
 ): WalletBetsState & { markClaimed: (marketAddress: string, betIds: bigint[]) => void } {
   const [betsByMarket, setBetsByMarket] = useState<Record<string, WalletBet[]>>({})
+  const [errorsByMarket, setErrorsByMarket] = useState<Record<string, string>>({})
   const [scannedCount, setScannedCount] = useState(0)
   const generation = useRef(0)
 
@@ -45,6 +41,7 @@ export function useWalletBets(
   useEffect(() => {
     if (!address || !publicClient || markets.length === 0) {
       setBetsByMarket({})
+      setErrorsByMarket({})
       setScannedCount(0)
       return
     }
@@ -52,60 +49,46 @@ export function useWalletBets(
     generation.current += 1
     const myGeneration = generation.current
     setBetsByMarket({})
+    setErrorsByMarket({})
     setScannedCount(0)
 
     let cancelled = false
     const bettor = address
+    const client = publicClient
 
-    async function run() {
-      const currentBlock = await publicClient!.getBlockNumber()
-      const currentSec = Date.now() / 1000
+    markets.forEach(async (market, i) => {
+      // Small stagger, not a hard queue: avoids firing every market's first
+      // request in the same instant, while still letting markets resolve
+      // independently and in parallel overall.
+      await sleep(i * 150)
+      if (cancelled || generation.current !== myGeneration) return
 
-      await Promise.all(
-        markets.map(async (market, i) => {
-          // Small stagger, not a hard queue: avoids firing every market's first
-          // batch of requests in the same instant (the burst that trips a strict
-          // public-RPC rate limit hardest), while still letting markets resolve
-          // independently and in parallel overall.
-          await sleep(i * 150)
-          try {
-            const marketAddress = market.marketAddress as Address
-            const snapshot = await fetchMarketSnapshot(publicClient!, marketAddress)
-            const logs = await fetchBetLogs(
-              publicClient!,
-              marketAddress,
-              bettor,
-              market.gameDate,
-              market.bettingOpensAt,
-              currentBlock,
-              currentSec
-            )
-            if (cancelled || generation.current !== myGeneration) return
-            if (!snapshot || logs.length === 0) {
-              setBetsByMarket(prev => ({ ...prev, [marketAddress]: [] }))
-              return
-            }
+      try {
+        const marketAddress = market.marketAddress as Address
+        const snapshot = await fetchMarketSnapshot(client, marketAddress)
+        if (cancelled || generation.current !== myGeneration) return
 
-            const claimedFlags = await fetchClaimedFlags(publicClient!, marketAddress, logs.map(l => l.betId))
-            if (cancelled || generation.current !== myGeneration) return
+        const rawBets = await fetchWalletBets(client, marketAddress, bettor)
+        if (cancelled || generation.current !== myGeneration) return
 
-            const bets = classifyBets(market, snapshot, logs, claimedFlags)
-            setBetsByMarket(prev => ({ ...prev, [marketAddress]: bets }))
-          } catch (err) {
-            console.error(`[bets] scan failed for ${market.marketAddress}:`, err)
-            if (!cancelled && generation.current === myGeneration) {
-              setBetsByMarket(prev => ({ ...prev, [market.marketAddress]: [] }))
-            }
-          } finally {
-            if (!cancelled && generation.current === myGeneration) {
-              setScannedCount(n => n + 1)
-            }
-          }
-        })
-      )
-    }
+        const bets = classifyBets(market, snapshot, rawBets)
+        setBetsByMarket(prev => ({ ...prev, [marketAddress]: bets }))
+      } catch (err) {
+        // lib/bets.ts already retried with backoff and logged the underlying
+        // error before rethrowing — this is the final, exhausted failure.
+        // Surface it distinctly rather than treating it as "no bets on this
+        // market," which would silently hide a wallet's real bets on an RPC hiccup.
+        const message = err instanceof Error ? err.message : 'Failed to load this market.'
+        if (!cancelled && generation.current === myGeneration) {
+          setErrorsByMarket(prev => ({ ...prev, [market.marketAddress]: message }))
+        }
+      } finally {
+        if (!cancelled && generation.current === myGeneration) {
+          setScannedCount(n => n + 1)
+        }
+      }
+    })
 
-    run()
     return () => {
       cancelled = true
     }
@@ -113,12 +96,16 @@ export function useWalletBets(
   }, [address, publicClient, marketKey])
 
   const bets = Object.values(betsByMarket).flat()
+  const errors = markets
+    .filter(m => errorsByMarket[m.marketAddress])
+    .map(m => ({ market: m, message: errorsByMarket[m.marketAddress] }))
 
   return {
     bets,
     loading: scannedCount < markets.length,
     scannedCount,
     totalCount: markets.length,
+    errors,
     // Flips claimed bets to their resolved History status locally — no rescan
     // needed, since the payout figure was already computed correctly from
     // final settlement state at scan time and claiming doesn't change it.
