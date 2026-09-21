@@ -215,11 +215,9 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
 
   // Both sides are quoted at all times — the symmetric payout is the product.
   // Computed here from raw pool state rather than calling the contract's own
-  // getMarketEV/simulatePayout: those simulate the stake correctly but divide
-  // by a winning-side denominator that still includes that side's
-  // PROTOCOL_SEED, while real settlement (_sumWinningStakes) never counts the
-  // seed — see lib/payout.ts. No extra RPC calls: this rides the same
-  // getMarketState poll already driving the header and pool figures.
+  // getMarketEV/simulatePayout to avoid an extra RPC call — this rides the
+  // same getMarketState poll already driving the header and pool figures.
+  // Same formula the v1.10 contract itself uses; see lib/payout.ts.
   const pool =
     greaterPool !== undefined &&
     lessEqualPool !== undefined &&

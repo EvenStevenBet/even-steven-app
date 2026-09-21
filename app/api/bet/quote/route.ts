@@ -69,10 +69,9 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: `market for gameId "${gameId}" is not open for betting` }, { status: 409 })
   }
 
-  // Computed here rather than via the contract's own getMarketEV: that
-  // function's winning-side denominator still includes that side's
-  // PROTOCOL_SEED, while real settlement (_sumWinningStakes) never counts the
-  // seed as a competing stake — see lib/payout.ts.
+  // Computed here rather than via an extra getMarketEV RPC call — same
+  // formula the v1.10 contract itself uses, reading this market's own
+  // protocolSeedTotal rather than assuming a fixed seed. See lib/payout.ts.
   const { currentPayout, liquidPayout } = quoteMarketEV(
     { greaterPool, lessEqualPool, totalPool, protocolSeedTotal },
     stake,
