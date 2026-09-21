@@ -4,9 +4,8 @@ import { enrichMarket } from '@/lib/markets'
 import type { MarketRow } from '@/lib/markets'
 import { APP_URL } from '@/lib/chain'
 import { BetSlip } from '@/components/BetSlip'
-import { serverPublicClient } from '@/lib/server-client'
-import { marketAbi } from '@/lib/contracts'
-import { formatMarketDate, formatUsdc } from '@/lib/format'
+import { PoolTotal } from '@/components/PoolTotal'
+import { formatMarketDate } from '@/lib/format'
 
 export const revalidate = 60
 
@@ -22,28 +21,6 @@ async function getMarket(gameId: string) {
     const row = data.find(m => m.gameId === decodeURIComponent(gameId))
     return row ? enrichMarket(row) : null
   } catch {
-    return null
-  }
-}
-
-/**
- * Stakes actually wagered, excluding the protocol seed. totalPool includes the
- * 2 USDC seed (1 per side) that counts toward the odds denominator but is never
- * distributable — showing it would make an untouched market look like it holds $2.
- */
-async function getStakedPool(marketAddress: `0x${string}`): Promise<bigint | null> {
-  try {
-    const [state, seed] = await serverPublicClient.multicall({
-      contracts: [
-        { address: marketAddress, abi: marketAbi, functionName: 'getMarketState' },
-        { address: marketAddress, abi: marketAbi, functionName: 'protocolSeedTotal' },
-      ],
-      allowFailure: false,
-    })
-    const totalPool = state[4]
-    return totalPool > seed ? totalPool - seed : BigInt(0)
-  } catch (err) {
-    console.error('[market] pool read failed:', err)
     return null
   }
 }
@@ -75,8 +52,6 @@ export default async function MarketPage({ params }: Props) {
       </main>
     )
   }
-
-  const stakedPool = market.isLive ? await getStakedPool(market.marketAddress as `0x${string}`) : null
 
   const kickoff = formatMarketDate(market.gameDate || market.parsedDate, {
     weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
@@ -135,10 +110,7 @@ export default async function MarketPage({ params }: Props) {
         <section className="grid gap-3 sm:grid-cols-2">
           <div className="ticket p-4">
             <p className="text-[10px] text-white/40 uppercase tracking-widest font-display">In this market</p>
-            <p className="mt-1 font-display text-2xl font-bold text-gold tabular">
-              {stakedPool === null ? '—' : `${formatUsdc(stakedPool)} USDC`}
-            </p>
-            <p className="mt-0.5 text-xs text-white/40">Total staked by bettors</p>
+            <PoolTotal marketAddress={market.marketAddress as `0x${string}`} />
           </div>
           <div className="ticket p-4">
             <p className="text-[10px] text-white/40 uppercase tracking-widest font-display">Settlement</p>
