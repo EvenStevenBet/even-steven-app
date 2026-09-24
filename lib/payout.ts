@@ -37,8 +37,9 @@ export interface QuoteResult {
 
 /**
  * quoteMarketEV(pool, stake, greaterThan) — same shape as getMarketEV's return,
- * computed client/server-side from raw getMarketState() values instead of
- * calling the (seed-inflated) contract function.
+ * computed client/server-side from raw getMarketState() values to save an
+ * RPC round trip. The contract function is correct as deployed (v1.10+);
+ * this mirrors its identity exactly rather than correcting it.
  */
 export function quoteMarketEV(pool: PoolState, stake: bigint, greaterThan: boolean): QuoteResult {
   if (stake === BigInt(0)) return { currentPayout: BigInt(0), liquidPayout: BigInt(0) }

@@ -138,10 +138,10 @@ function EmptyState() {
       </div>
       <div className="space-y-2">
         <p className="font-display text-xl font-semibold text-white/80">
-          NFL preseason markets open soon.
+          No markets open right now.
         </p>
         <p className="text-white/40 text-sm max-w-sm mx-auto">
-          Contracts deploy before each game. Check back close to kickoff.
+          Markets open ahead of each game. Check back closer to game time.
         </p>
       </div>
       <Link href="/how-it-works" className="btn-ghost inline-flex text-sm">

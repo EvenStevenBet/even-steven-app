@@ -23,7 +23,6 @@ const MAIN = {
 } as const
 
 const TESTNET = {
-  market:  '0xF536a69C12230FB094fA3C5850f8569957158AC2',
   usdc:    '0x036cbd53842c5426634e7929541ec2318f3dcf7e',
   umaOov3: '0x0F7fC5E6482f096380db6158f978167b57388deE',
 } as const
@@ -287,21 +286,51 @@ export default function HowItWorksPage() {
         </p>
       </Section>
 
-      {/* ── 03b. No owner override ───────────────────────────────────────── */}
-      {/* Correction applied: cancellation refund language per audit S-1 */}
-      <Section id="trustless" number="03b" title="No owner override.">
+      {/* ── 03b. What the owner controls ─────────────────────────────────── */}
+      {/* Correction applied: owner powers stated accurately against v1.11 source */}
+      <Section id="trustless" number="03b" title="What the owner can and can't do.">
         <p>
-          Once a market is deployed, the owner cannot pause it, cancel it
-          arbitrarily, or change the fee. The only cancellation path is if
-          settlement fails for 7 days, at which point anyone can call{' '}
-          <code className="text-gold/90">triggerRefund()</code> — your stake is
-          returned in full.
+          The owner runs a market&apos;s lifecycle. They can pause it (no new
+          bets or settlement while paused), close betting early, or cancel it.
+          Cancelling puts the market into refund mode: every stake comes back
+          in full. The 2% fee is not refunded — it was collected when you bet.
+        </p>
+        <p className="mt-4">The owner cannot:</p>
+        <ul className="mt-3 space-y-2 text-sm text-white/60 list-none">
+          <li>
+            — <span className="text-white/80">Change the outcome.</span>{' '}
+            <code className="text-gold/90">settle()</code> was removed in v1.8.
+            Only UMA&apos;s oracle decides the result, and anyone can call{' '}
+            <code className="text-gold/90">executeSettlement()</code> to apply it.
+          </li>
+          <li>
+            — <span className="text-white/80">Change the fee.</span>{' '}
+            <code className="text-gold/90">FEE_PERCENT</code> is set when the
+            market is deployed and can never change.
+          </li>
+          <li>
+            — <span className="text-white/80">Touch the pool.</span> The owner
+            can recover stray USDC with{' '}
+            <code className="text-gold/90">recoverStuckBond()</code>, but the
+            code caps it at the contract balance minus the pool. Staked money
+            is out of reach.
+          </li>
+          <li>
+            — <span className="text-white/80">Stop you from claiming.</span> The
+            claim functions ignore pause. If you&apos;re owed money, you can
+            withdraw it, paused or not.
+          </li>
+        </ul>
+        <p className="mt-4">
+          One backstop doesn&apos;t need the owner at all: if a closed market
+          goes 7 days without a settlement assertion, anyone can call{' '}
+          <code className="text-gold/90">triggerRefund()</code> to return every
+          stake.
         </p>
         <p className="mt-4 text-white/60">
-          The same logic governs legitimate cancellations (e.g., a game that
-          does not take place): if a game is cancelled, your stake is refunded
-          in full. The 2% fee paid at placement is not refunded — it was already
-          collected when you bet. 90-day claim window.
+          Claims stay open for 90 days. After that, the owner can sweep any
+          unclaimed balance with{' '}
+          <code className="text-gold/90">sweepUnclaimed()</code>.
         </p>
       </Section>
 
@@ -332,17 +361,21 @@ export default function HowItWorksPage() {
             — all contract code is public.
           </li>
           <li>
-            <span className="text-white/80">Five audit rounds</span>{' '}
+            <span className="text-white/80">Six audit reports</span>{' '}
             <span className="text-white/40">
-              (Claude Opus, March–June 2026). All critical and high findings
-              resolved. Not a formal third-party audit.
+              (Claude Opus, March–September 2026): three full reviews and three
+              delta audits of later releases, most recently v3. All critical and
+              high findings resolved. Not a formal third-party audit.
             </span>
           </li>
           <li>
             <code className="text-gold/90">getMarketEV(stake, side)</code>{' '}
             <span className="text-white/60">
-              — call it yourself on any live market to check the math.
-              Payout numbers in this app come directly from this function.
+              — call it on any live market to check the math. This app computes
+              the same formula locally from{' '}
+              <code className="text-gold/60">getMarketState()</code> and{' '}
+              <code className="text-gold/60">protocolSeedTotal()</code> to save
+              a network call. The numbers match the contract.
             </span>
           </li>
         </ul>
@@ -374,9 +407,12 @@ export default function HowItWorksPage() {
           <div>
             <dt className="text-white font-semibold">Cancellation</dt>
             <dd className="mt-1 text-white/60">
-              If a game is cancelled, your stake is refunded in full. The 2%
-              fee paid at placement is not refunded — it was already collected
-              when you bet. 90-day claim window.
+              If a game doesn&apos;t take place, the owner cancels the market
+              with <code className="text-gold/90">cancelMarket()</code>.
+              Cancelling can&apos;t pick a winner — it only switches the market
+              to refund mode. Every stake is returned in full. The 2% fee is
+              not, since it was collected when you bet. You have 90 days to
+              claim.
             </dd>
           </div>
           <div>
@@ -406,13 +442,16 @@ export default function HowItWorksPage() {
             title="Settlement → claim"
             detail={
               <>
-                Normal path. Game ends, anyone calls{' '}
+                Normal path. After the game, anyone calls{' '}
                 <code className="text-gold/90">requestSettlement(finalSpread)</code>{' '}
-                with a USDC bond. After the 2-hour UMA liveness window,{' '}
+                with a USDC bond. After UMA&apos;s 2-hour liveness window,{' '}
                 <code className="text-gold/90">executeSettlement()</code>{' '}
-                finalizes. Winners call{' '}
-                <code className="text-gold/90">claimAllPayouts()</code>.
-                90-day claim window post-settlement.
+                finalizes the result. Winners call{' '}
+                <code className="text-gold/90">claimAllPayouts()</code> — or
+                anyone can claim for a winner with{' '}
+                <code className="text-gold/90">claimPayoutFor(bettor, betIds)</code>,
+                which always pays the bettor. 90-day claim window after
+                settlement.
               </>
             }
           />
@@ -454,6 +493,34 @@ export default function HowItWorksPage() {
           — <code className="text-gold/70">cancelMarket()</code>,{' '}
           <code className="text-gold/70">triggerRefund()</code>,{' '}
           <code className="text-gold/70">sweepUnclaimed()</code>
+        </p>
+      </Section>
+
+      {/* ── 06b. Gasless for agents ──────────────────────────────────────── */}
+      <Section id="gasless" number="06b" title="Gasless for agents (v3).">
+        <p>
+          On markets created by Factory v1.6, a bettor needs USDC and nothing
+          else. No ETH, ever.
+        </p>
+        <p className="mt-4">
+          <span className="text-white font-medium">Betting.</span> The bettor
+          signs a USDC transfer authorization (EIP-3009). A relay submits it
+          with <code className="text-gold/90">placeBetFor()</code> and pays the
+          gas. The bet is recorded to the signer, never to the relay. Ordinary
+          wallets — including MetaMask accounts upgraded with EIP-7702 — use{' '}
+          <code className="text-gold/90">placeBetFor()</code>. Smart-contract
+          wallets whose signatures don&apos;t fit the standard 65-byte format
+          use{' '}
+          <code className="text-gold/90">placeBetForWithSignature()</code>, and
+          USDC verifies them through ERC-1271.
+        </p>
+        <p className="mt-4">
+          <span className="text-white font-medium">Collecting.</span> Anyone can
+          submit{' '}
+          <code className="text-gold/90">claimPayoutFor(bettor, betIds)</code>.
+          No signature is needed, because the payout can only go to the bettor
+          recorded on the bet. The relay pays the gas and never touches the
+          money.
         </p>
       </Section>
 
@@ -523,11 +590,6 @@ export default function HowItWorksPage() {
           <table className="min-w-[500px] w-full text-xs border-collapse">
             <tbody>
               <ContractRow
-                label="SportsbookMarket (reference)"
-                addr={TESTNET.market}
-                href={`${SEPOLIA_BS}/address/${TESTNET.market}`}
-              />
-              <ContractRow
                 label="USDC (Circle testnet)"
                 addr={TESTNET.usdc}
                 href={`${SEPOLIA_BS}/address/${TESTNET.usdc}`}
@@ -558,7 +620,7 @@ export default function HowItWorksPage() {
       {/* ═══════════════════════════════════════════════════════════════════
           DEVELOPER / AGENT ANNEX
           Visually separated — intended for builders and agents, not general
-          readers. All code verified against deployed v1.8.1.
+          readers. All code verified against deployed v1.11.
       ═══════════════════════════════════════════════════════════════════ */}
       <div className="pt-8 border-t-2 border-gold/20 space-y-8">
         <div className="space-y-1">
@@ -652,14 +714,14 @@ address market = factory.marketByGameId("NFL-2026-01-15-HOME-Chiefs-AWAY-49ers")
     uint256 liquidPayout,   // gross return at balanced pools — exactly $200 on $100 stake
     uint256 impliedVig      // protocol fee in bps — 200 = 2%
 ) = market.getMarketEV(stake, greaterThan);
-// Note: getMarketEV() as deployed slightly under-quotes (its denominator
-// counts the 1 USDC protocol seed as a competing stake) — worst on thin
-// pools, negligible on deep ones. Real settlement always pays exactly 2x
-// at balance. See AGENTS.md for the corrected formula; evensteven.bet's
-// own x402 endpoints already apply it server-side.
+// Note: getMarketEV() is exact as deployed. The seed-inflated denominator
+// was a v1.9 quoting bug, fixed on-chain in v1.10 and unchanged in v1.11:
+// seedPerSide is read from protocolSeedTotal and excluded, and liquidPayout
+// is simply stake * 2. Settlement never counted the seed in either version.
+// Do not re-apply the old client-side "correction" — it now double-counts.
 
 // Kelly criterion note:
-// liquidPayout / stake = gross multiplier at liquidity (exactly 2.0 at balance, once corrected)
+// liquidPayout / stake = gross multiplier at liquidity (exactly 2.0 at balance)
 // True cost basis     = stake * (1 + impliedVig / 10000)  // 2% fee on stake
 // Opportunity check   : currentPayout > liquidPayout → early imbalance favors you
 // Net EV              = (probability * currentPayout) - stake - (stake * impliedVig / 10000)`}</CodeBlock>
@@ -690,7 +752,52 @@ market.claimAllPayouts(); // claims all your bets in one transaction
 // Or claim a specific bet by ID:
 market.claimPayout(betId);
 
+// Claim on someone else's behalf — permissionless, no signature.
+// Payout always goes to the bettor recorded on the bet, never to msg.sender.
+market.claimPayoutFor(bettor, [betIds]);
+
 // 90-day claim window — after that, sweepUnclaimed() moves funds to the protocol`}</CodeBlock>
+        </div>
+
+        {/* Gasless (v3) */}
+        <div className="space-y-3">
+          <h3 className="font-display text-base font-semibold text-white/80 uppercase tracking-wider">
+            Gasless bet &amp; claim (v3)
+          </h3>
+          <CodeBlock lang="solidity">{`// The bettor signs an EIP-3009 USDC authorization; a relay submits it and
+// pays the gas. The bet is recorded to the signer, never to the relay.
+// nonce MUST be keccak256(abi.encode(salt, greaterThan)) — binding the
+// authorization to one side of the line. A random x402-style nonce is
+// rejected with BadAuthorizationNonce(). Signing details: AGENTS.md.
+market.placeBetFor(bettor, greaterThan, stake, auth);
+
+// Same, for smart-contract wallets whose signature isn't 65-byte ECDSA.
+// USDC verifies it via ERC-1271. EIP-7702 accounts such as MetaMask's sign
+// standard 65-byte signatures and use placeBetFor() above.
+market.placeBetForWithSignature(bettor, greaterThan, stake, auth);
+
+// Collecting needs no signature at all. Payout goes only to the bettor.
+market.claimPayoutFor(bettor, [betIds]);`}</CodeBlock>
+        </div>
+
+        {/* Events & errors */}
+        <div className="space-y-3">
+          <h3 className="font-display text-base font-semibold text-white/80 uppercase tracking-wider">
+            Events &amp; errors
+          </h3>
+          <CodeBlock lang="solidity">{`// v3 adds two events. Both are additive — nothing existing changed.
+event BetClaimed(address indexed bettor, uint256 indexed betId, uint256 payout);
+event SettlementDetails(uint256 distributable, uint256 winningStakes);
+
+// BetClaimed fires once per claimed bet, on every claim path.
+// SettlementDetails publishes the two inputs to the payout formula:
+//   payout = stake * distributable / winningStakes   (refund mode: payout = stake)
+// Together with BetPlaced, any payout can be computed from logs alone.
+
+// v3 also replaces two inherited OpenZeppelin require-strings with custom
+// errors, so a revert is machine-readable:
+error MarketPaused();  // was "Pausable: paused"
+error NotOwner();      // was "Ownable: caller is not the owner"`}</CodeBlock>
         </div>
 
         <p className="text-xs text-white/30 pt-2">
@@ -703,8 +810,9 @@ market.claimPayout(betId);
           >
             AGENTS.md
           </a>
-          . Protocol version: v1.8.1. Audited by Claude Opus, five rounds,
-          March–June 2026.
+          . Protocol version: v1.11. Six audit reports by Claude Opus,
+          March–September 2026: three full reviews and three delta audits of
+          later releases. Not a formal third-party audit.
         </p>
       </div>
 
