@@ -35,7 +35,7 @@ All chain-specific values come from environment variables so the app flips betwe
 
 ```
 NEXT_PUBLIC_CHAIN=base | baseSepolia
-NEXT_PUBLIC_FACTORY_ADDRESS=        # mainnet: 0x9E9C769aaCa509cD67Fbca2236dB26d8428a8027 (v1.3)
+NEXT_PUBLIC_FACTORY_ADDRESS=        # mainnet: 0x5906370b9831728ec523b647137a1bbf0ab45390 (v1.6)
 NEXT_PUBLIC_USDC_ADDRESS=           # mainnet: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
 NEXT_PUBLIC_ALCHEMY_KEY=
 NEXT_PUBLIC_PAYMASTER_URL=          # Coinbase Developer Platform paymaster endpoint
@@ -68,7 +68,7 @@ Rules:
 - **Z values are 4-decimal fixed-point:** `-35000` displays as `-3.5`. `lockedZ` is the line a bet settles against; `currentZ` is the live line. `finalSpread` is a whole integer, positive = home team won by that margin.
 - **USDC approval (EOA path):** Circle USDC on Base intermittently rejects exact-amount approvals. Flow: check allowance → if insufficient, approve `type(uint256).max` → then bet. Never approve exact amounts.
 - Market lifecycle for status display: **open** (accepting bets) → **closed / awaiting settlement** (game over; UMA assertion in its ~2-hour liveness window) → **settled** (payouts claimable). Also possible: **cancelled** (full refund, no fee, 90-day claim window) and **refund mode** (anyone can `triggerRefund()` if a closed market goes 7 days unsettled — full refund, no fee).
-- Factory: use its view functions (e.g. `getMarketInfo(address)`) for per-market metadata; check the v1.3 source for exact signatures.
+- Factory: use its view functions (e.g. `getMarketInfo(address)`) for per-market metadata; check the v1.6 source for exact signatures.
 
 ## 5. Wallet layer & one-tap betting
 

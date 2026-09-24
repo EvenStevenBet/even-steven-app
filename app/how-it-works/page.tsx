@@ -14,11 +14,12 @@ const SEPOLIA_BS  = 'https://sepolia.basescan.org'
 
 // Mainnet deployment facts — hardcoded, not env-driven
 const MAIN = {
-  factoryV13: '0x9E9C769aaCa509cD67Fbca2236dB26d8428a8027',
-  factoryV12: '0x08BA5624107536d1CEA043B372978E7e9516E214', // retired
+  factoryV16: '0x5906370b9831728ec523b647137a1bbf0ab45390',
+  factoryV15: '0xf69d4c986bb9fa8177e74b8cb9e2c49f4200adbd', // superseded
+  deployerV11: '0xb86d291104d23d47906776538db82191681257c2',
   usdc:       '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
   umaOov3:    '0x2aBf1Bd76655de80eDB3086114315Eec75AF500c',
-  deployTx:   '0x2ec96b82ced224a4eefa68b7b75ae30f20bb1ec810c069d94efbeb00408f0d25',
+  deployTx:   '0x06581affd7535a03a594ef6ff851e7aae2baf1de272f3d8f032921f31b9cb2d7',
 } as const
 
 const TESTNET = {
@@ -310,7 +311,7 @@ export default function HowItWorksPage() {
         <ul className="space-y-3 text-sm">
           <li>
             <a
-              href={`${BASESCAN}/address/${MAIN.factoryV13}`}
+              href={`${BASESCAN}/address/${MAIN.factoryV16}`}
               target="_blank"
               rel="noopener noreferrer"
               className="text-gold underline underline-offset-2"
@@ -473,14 +474,19 @@ export default function HowItWorksPage() {
             </thead>
             <tbody>
               <ContractRow
-                label="SportsbookFactory v1.3"
-                addr={MAIN.factoryV13}
-                href={`${BASESCAN}/address/${MAIN.factoryV13}`}
+                label="SportsbookFactory v1.6"
+                addr={MAIN.factoryV16}
+                href={`${BASESCAN}/address/${MAIN.factoryV16}`}
               />
               <ContractRow
-                label="SportsbookFactory v1.2 (retired)"
-                addr={MAIN.factoryV12}
-                href={`${BASESCAN}/address/${MAIN.factoryV12}`}
+                label="MarketDeployer v1.1"
+                addr={MAIN.deployerV11}
+                href={`${BASESCAN}/address/${MAIN.deployerV11}`}
+              />
+              <ContractRow
+                label="SportsbookFactory v1.5 (superseded)"
+                addr={MAIN.factoryV15}
+                href={`${BASESCAN}/address/${MAIN.factoryV15}`}
                 retired
               />
               <ContractRow
