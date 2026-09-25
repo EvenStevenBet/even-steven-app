@@ -97,6 +97,6 @@ export async function GET(request: NextRequest) {
       impliedVig: impliedVig.toString(),
       netProfitAtLiquidity: (liquidPayout - totalCost).toString(),
     },
-    note: 'POST /api/bet not available on v1. v2 placeBetFor coming in 1-2 weeks.',
+    note: 'To place this bet, sign an EIP-3009 ReceiveWithAuthorization for totalCost (to = marketAddress) and POST it to /api/bet.',
   })
 }
