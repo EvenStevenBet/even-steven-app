@@ -20,6 +20,10 @@ import { serverPublicClient } from '@/lib/server-client'
 import { marketAbi, factoryAbi, erc20Abi } from '@/lib/contracts'
 import { formatZDisplay } from '@/lib/format'
 import { relayAccount, relayWalletClient, getRelayEthBalance, RELAY_MIN_ETH } from '@/lib/relay'
+import {
+  acquireLock, clientIp, consumeRateLimit, recordStrike, releaseLock, strikeCounts,
+  LOCK_TTL_SECONDS, MAX_STRIKES, RATE_LIMIT_PER_MINUTE,
+} from '@/lib/abuse'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 30
@@ -68,6 +72,12 @@ const USDC_REASONS: [RegExp, string][] = [
   [/^Pausable: paused$/, 'UsdcPaused'],
 ]
 
+// Fail closed: without the lock store the relay cannot guarantee one submission per authorization.
+function lockServiceUnavailable(err: unknown) {
+  console.error('[api/bet] lock store unavailable — refusing to submit', err)
+  return fail(503, 'LockServiceUnavailable', 'bet lock service is unavailable; nothing was submitted')
+}
+
 function isNonceCollision(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err)
   return /nonce too low|nonce has already been used|replacement transaction underpriced/i.test(msg)
@@ -84,6 +94,18 @@ export async function POST(request: NextRequest) {
 
 async function handle(request: NextRequest) {
   // No x402 gate: the only fee is the contract's 2% taker fee, taken at placement.
+  // 0. Per-IP rate limit
+  const ip = clientIp(request)
+  try {
+    const rl = await consumeRateLimit(ip)
+    if (rl.limited) {
+      return fail(429, 'RateLimited', `more than ${RATE_LIMIT_PER_MINUTE} requests per minute from this IP`,
+        { retryAfterSeconds: rl.retryAfterSeconds })
+    }
+  } catch (err) {
+    return lockServiceUnavailable(err)
+  }
+
   // 1. Shape validation
   let body: Record<string, unknown>
   try {
@@ -167,7 +189,24 @@ async function handle(request: NextRequest) {
   }
   const relay = relayAccount.address
 
-  // 4 + 5. Route by signature shape and simulate from the relay with the exact args
+  // 4. Strike check, then the in-flight lock. Every exit before submission releases it.
+  try {
+    const strikes = await strikeCounts(bettor, ip)
+    if (strikes.bettor >= MAX_STRIKES || strikes.ip >= MAX_STRIKES) {
+      return fail(429, 'TooManyFailedSubmissions',
+        `${MAX_STRIKES} of this bettor's or this IP's submissions reverted on-chain in the last 24 hours`,
+        { maxStrikes: MAX_STRIKES })
+    }
+    if (!(await acquireLock(bettor, nonce))) {
+      return fail(409, 'DuplicateSubmission',
+        'this authorization (bettor + nonce) is already in flight or was submitted recently; nothing was submitted',
+        { lockSeconds: LOCK_TTL_SECONDS })
+    }
+  } catch (err) {
+    return lockServiceUnavailable(err)
+  }
+
+  // 5. Route by signature shape and simulate from the relay with the exact args
   const common = { address: marketAddress, abi: marketAbi, account: relayAccount } as const
   let submit: () => Promise<Hash>
   try {
@@ -187,17 +226,26 @@ async function handle(request: NextRequest) {
       submit = () => relayWalletClient!.writeContract(tx)
     }
   } catch (err) {
+    await releaseLock(bettor, nonce)
     return simulationFailure(err, { marketAddress, bettor, stake, validAfter, validBefore, nonce })
   }
 
   // 6. Never submit from an underfunded relay
-  const relayBalance = await getRelayEthBalance()
+  let relayBalance: bigint
+  try {
+    relayBalance = await getRelayEthBalance()
+  } catch (err) {
+    await releaseLock(bettor, nonce)
+    throw err
+  }
   if (relayBalance < RELAY_MIN_ETH) {
+    await releaseLock(bettor, nonce)
     console.error(`[api/bet] RelayUnderfunded: ${relay} holds ${relayBalance} wei, minimum ${RELAY_MIN_ETH}`)
     return fail(503, 'RelayUnderfunded', 'relay wallet is below its ETH gas threshold; try again later')
   }
 
-  // 7. Submit, retrying once on a relay nonce collision (concurrent invocations)
+  // 7. Submit, retrying once on a relay nonce collision (concurrent invocations).
+  // From here on the lock is kept until it expires: the authorization is in flight, spent, or (after a revert) still valid.
   let txHash: Hash
   try {
     try {
@@ -220,6 +268,7 @@ async function handle(request: NextRequest) {
   }
   if (receipt.status !== 'success') {
     console.error(`[api/bet] SubmissionReverted ${txHash}`)
+    await recordStrike(bettor, ip)
     return fail(502, 'SubmissionReverted', 'bet transaction reverted on-chain', { txHash })
   }
 
