@@ -110,7 +110,7 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({
     markets,
     relay: {
-      note: 'POST /api/bet is not available — agent write betting requires v2 contract (placeBetFor). Coming soon.',
+      note: 'Place bets via POST /api/bet — see AGENTS.md for the full relay guide.',
       quoteEndpoint: 'GET /api/bet/quote',
       statusEndpoint: 'GET /api/bet/status',
     },
