@@ -24,6 +24,9 @@ import {
   acquireLock, clientIp, consumeRateLimit, recordStrike, releaseLock, strikeCounts,
   LOCK_TTL_SECONDS, MAX_STRIKES, RATE_LIMIT_PER_MINUTE,
 } from '@/lib/abuse'
+import { refDataSuffix } from '@/lib/attribution'
+import { buildRecord, recordAttribution } from '@/lib/attribution-store'
+import { resolveRefForBettor } from '@/lib/refs'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 30
@@ -145,6 +148,8 @@ async function handle(request: NextRequest) {
   const nonce = body.nonce as Hash
   const salt = body.salt as Hash
   const signature = body.signature as Hex
+  // Optional attribution. Anything that doesn't resolve is dropped silently — never fail a bet over it.
+  const ref = resolveRefForBettor(body.ref, bettor)
 
   // 2. Resolve the market — must be a SportsbookFactory v1.6 market
   let marketAddress: Address
@@ -207,7 +212,8 @@ async function handle(request: NextRequest) {
   }
 
   // 5. Route by signature shape and simulate from the relay with the exact args
-  const common = { address: marketAddress, abi: marketAbi, account: relayAccount } as const
+  const dataSuffix = ref ? refDataSuffix(ref.id.toLowerCase()) : undefined
+  const common = { address: marketAddress, abi: marketAbi, account: relayAccount, dataSuffix } as const
   let submit: () => Promise<Hash>
   try {
     if (size(signature) === 65) {
@@ -293,6 +299,19 @@ async function handle(request: NextRequest) {
   }
 
   const ev = betEvents[0].args
+
+  let recordedRef: string | undefined
+  try {
+    const block = await serverPublicClient.getBlock({ blockNumber: receipt.blockNumber })
+    const written = await recordAttribution(buildRecord(
+      { txHash, marketAddress, betId: ev.betId, bettor: ev.bettor, stake: ev.stake, fee: ev.fee },
+      ref, 'relay', block.timestamp,
+    ))
+    if (written && ref) recordedRef = ref.id
+  } catch (err) {
+    console.error('[api/bet] attribution record failed; the bet itself succeeded', { txHash }, err)
+  }
+
   return NextResponse.json({
     success: true,
     betId: ev.betId.toString(),
@@ -307,6 +326,7 @@ async function handle(request: NextRequest) {
     lockedZDisplay: formatZDisplay(ev.lockedZ),
     txHash,
     blockNumber: receipt.blockNumber.toString(),
+    ...(recordedRef ? { ref: recordedRef } : {}),
   })
 }
 
