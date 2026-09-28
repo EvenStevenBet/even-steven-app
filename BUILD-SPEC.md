@@ -67,7 +67,7 @@ Rules:
 - **Enumerating a user's bets:** check the `BetPlaced` event declaration in the source — `BetPlaced(bettor, betId, stake, fee, greaterThan, lockedZ)`. If `bettor` is indexed, filter logs by it; if not, pull the market's `BetPlaced` logs and filter client-side (fine at launch scale). Scan only markets listed in the sheet.
 - **Z values are 4-decimal fixed-point:** `-35000` displays as `-3.5`. `lockedZ` is the line a bet settles against; `currentZ` is the live line. `finalSpread` is a whole integer, positive = home team won by that margin.
 - **USDC approval (EOA path):** Circle USDC on Base intermittently rejects exact-amount approvals. Flow: check allowance → if insufficient, approve `type(uint256).max` → then bet. Never approve exact amounts.
-- Market lifecycle for status display: **open** (accepting bets) → **closed / awaiting settlement** (game over; UMA assertion in its ~2-hour liveness window) → **settled** (payouts claimable). Also possible: **cancelled** (full refund, no fee, 90-day claim window) and **refund mode** (anyone can `triggerRefund()` if a closed market goes 7 days unsettled — full refund, no fee).
+- Market lifecycle for status display: **open** (accepting bets) → **closed / awaiting settlement** (game over; UMA assertion in its ~2-hour liveness window) → **settled** (payouts claimable). Also possible: **cancelled** (every stake refunded in full, 90-day claim window) and **refund mode** (anyone can `triggerRefund()` if a closed market goes 7 days unsettled — every stake refunded in full). In both, the 2% fee is not refunded: it was collected at placement.
 - Factory: use its view functions (e.g. `getMarketInfo(address)`) for per-market metadata; check the v1.6 source for exact signatures.
 
 ## 5. Wallet layer & one-tap betting
@@ -116,7 +116,7 @@ Written for a skeptical crypto-native reader. Order:
 2. **The fee, honestly** — 2% on stake, upfront, once; the $102 → $200 → $98 walk-through; fee never touches the pool; `FEE_PERCENT` immutable per market.
 3. **Trustless settlement** — UMA optimistic oracle, `assertTruth()`, the ~2-hour dispute window as a *feature*; `settle()` removed, no owner override, enforced in code not promised in docs.
 4. **Verify everything** — BaseScan links (factory + a sample market), GitHub (MIT), audit history (five rounds, honest note that it's not a formal third-party audit), `getMarketEV` as the "check my math" function.
-5. **Edge cases** — early/unbalanced pools (payouts float until liquidity; your line locks at bet time), cancellations (full refund, no fee), the 7-day refund backstop.
+5. **Edge cases** — early/unbalanced pools (payouts float until liquidity; your line locks at bet time), cancellations (stake refunded in full; the 2% fee is not refunded, it was collected at placement), the 7-day refund backstop.
 Source copy facts from README.md in the workspace — do not invent numbers.
 
 ## 7. Share-a-bet, builder codes and points (the viral loop)

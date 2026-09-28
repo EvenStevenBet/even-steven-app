@@ -19,7 +19,7 @@ export type MarketLifecycle =
   | 'open'           // accepting bets
   | 'closed'         // game over, UMA assertion in liveness window (~2hr)
   | 'settled'        // payouts claimable
-  | 'cancelled'      // full refund (no fee), 90-day claim window
+  | 'cancelled'      // stake refunded in full (the 2% fee is not), 90-day claim window
   | 'refund'         // 7-day backstop: anyone can triggerRefund()
   | 'coming-soon'    // no marketAddress yet
 
