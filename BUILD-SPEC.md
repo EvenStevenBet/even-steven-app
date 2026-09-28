@@ -25,7 +25,7 @@ The #1 priority is distribution and conversion. Every decision below was made de
 - **Base MiniKit / OnchainKit** for Mini App manifest + Base App integration
 - **Coinbase Smart Wallet** as the featured connector; injected (MetaMask) and WalletConnect as fallbacks
 - Hosting: **Vercel**. RPC: **Alchemy** (key via env)
-- No database. No backend beyond Next.js API routes. No localStorage for anything critical.
+- No database beyond the Upstash store (relay abuse protection and attribution records, §7). No backend beyond Next.js API routes. No localStorage for anything critical.
 
 **Before building the manifest and Smart Wallet flows, consult the current docs** (docs.base.org — MiniKit, Mini App manifest spec, Paymaster). Naming has churned recently: Farcaster "Frames v2" was renamed **Mini Apps**, and Base App + Farcaster now share the manifest spec. Do not build against the deprecated `@farcaster/frame-sdk` Frames-v2 patterns from older tutorials.
 
@@ -102,7 +102,7 @@ Persistent header: logo (file `evenstevenlogogold.png` in workspace), nav (Marke
   - **Net profit: $98.00 exactly**
 - Show the locked line plainly: "Your line locks at −3.5 when you bet."
 - Place Bet button → Smart Wallet one-tap or EOA two-step per §5, with pending/confirmed/failed states and the Basescan tx link.
-- Post-bet confirmation includes the **Share** action (§7).
+- Post-bet confirmation includes the **Share** action (§7): X, Farcaster and copy link, pointing at the Tail/Fade page for that bet.
 - If market is awaiting settlement: explain the window in plain language — "Game over. The result was submitted to UMA's oracle and can be challenged for ~2 hours. If unchallenged, it finalizes and payouts open." Never let this state look broken.
 
 ### 6.3 My Bets (`/bets`)
@@ -119,13 +119,25 @@ Written for a skeptical crypto-native reader. Order:
 5. **Edge cases** — early/unbalanced pools (payouts float until liquidity; your line locks at bet time), cancellations (full refund, no fee), the 7-day refund backstop.
 Source copy facts from README.md in the workspace — do not invent numbers.
 
-## 7. Share-a-bet (the viral loop)
+## 7. Share-a-bet, builder codes and points (the viral loop)
 
-- Every market has a canonical URL (`/market/[gameId]`) rendering a **dynamic OG image** (via `@vercel/og` or App Router `opengraph-image`): matchup, line, "Bet $100, win $100," brand styling — so links unfurl rich everywhere.
-- Share triggers: post-bet confirmation ("I've got Chiefs −3.5") and post-win in My Bets ("Chiefs −3.5 ✓ paid $200 on $100").
-- In Farcaster/Base App context: use the Mini App SDK compose-cast action with the market URL embedded so the cast unfurls as a tappable Mini App card — the person seeing it can bet the other side without leaving the feed.
-- In browser context: X share intent + copy-link.
-- No referral tracking, no points, no database. The share IS the loop.
+Revised Sept 2026. The original "no referral tracking, no points, no database" rule is superseded. Everything below is off-chain; no contract changes.
+
+**Share cards (Tail / Fade)**
+- Every bet has a share page, `/bet/<marketAddress>/<betId>`. It shows the teams, the pick, and the locked line in plain English. That text is the same `lineSentence` the bet slip prints, derived with the `m = floor(z) + 1` rule and with the team name attached. It also shows the current line, a pool balance meter (the primary visual), and a secondary "if [team] covers, at current pools" multiple: distributable pool / that side's stakes, seed excluded. Never claim a thin pool pays 2×.
+- The image comes from `/api/og/bet?market=&betId=`: 1200×630 for X/OG, or `&aspect=3:2` for the `fc:miniapp` embed. Brand colors are black `#0a0a0a`, gold `#f5c842` and white.
+- **Tail** (same side) and **Fade** (other side) link to `/market/<gameId>?side=home|away&ref=<ref>`. The ref is the sharer's builder code if they have one, else their wallet address. `/market/<address>` 308-redirects to the gameId URL, keeping the query string.
+- Share triggers: after every successful bet, on active bets in My Bets, and on won bets. Each offers X intent, Farcaster (Mini App SDK `composeCast` inside Farcaster/Base App, the web composer elsewhere) and copy link. The page must work without wallet JS in X's in-app browser.
+
+**Refs and builder codes**
+- A ref is an approved builder code (lowercase `[a-z0-9-]{3,32}`, `approved: true` in `data/builders.json`), which earns 30% of the fee plus referral points, or any wallet address, which earns referral points only. A ref that pays the bettor is dropped (no self-referral).
+- Refs travel on-chain as an ERC-8021 schema-0 calldata suffix appended to `placeBet` (web: both the Smart Wallet batch and EOA paths) or `placeBetFor` (relay, from `ref` in the `POST /api/bet` body). The market ignores trailing calldata.
+- Attribution records: one per txHash in Upstash (`attr:tx:<hash>`, SET NX, no TTL, indexed in `attr:index`). The relay writes its record after its success checks pass. Web bets POST `{ txHash }` to `/api/attribution`, which requires exactly one `BetPlaced` from a Factory v1.6 market and reads the ref from the transaction's own calldata, never from the request body.
+- The weekly builder report (30% of fee, `BUILDER_SHARE_BPS`) runs in the private `even-steven-ops` repo. Nothing is transferred automatically.
+
+**Points v0**
+- A ledger, not a token. The rates are 100 points per USDC staked (to the bettor, win or lose) and 50 per USDC staked by bets a ref brought in, set by `POINTS_PER_USDC` and `REF_POINTS_PER_USDC`.
+- `even-steven/scripts/points.mjs` runs hourly and commits `data/points.json`. The app shows a top 50 at `/points` and "Your points" on `/bets`.
 
 ## 8. Mini App manifest
 
