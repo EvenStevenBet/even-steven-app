@@ -3,12 +3,46 @@ import { isAddress } from 'viem'
 import { serverPublicClient } from '@/lib/server-client'
 import { marketAbi } from '@/lib/contracts'
 import { formatZDisplay } from '@/lib/format'
-import { requirePayment } from '@/lib/x402-server'
+import { requirePayment, type PaidResource } from '@/lib/x402-server'
 
 export const dynamic = 'force-dynamic'
 
+const RESOURCE: PaidResource = {
+  description:
+    "A bettor's Even Steven positions on one market: stakes that pay even money at liquidity, the early line each bet locked, and claim status, with the flat 2% fee on stake already paid upfront.",
+  inputSchema: {
+    queryParams: {
+      marketAddress: 'Market contract address',
+      bettor: 'Bettor wallet address',
+    },
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      marketAddress: { type: 'string' },
+      bettor: { type: 'string' },
+      bets: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            betId: { type: 'string' },
+            side: { type: 'string', enum: ['home', 'away'] },
+            greaterThan: { type: 'boolean' },
+            stake: { type: 'string', description: 'USDC 6-decimals, excluding the upfront fee' },
+            lockedZ: { type: 'string', description: 'Line locked at placement, 4-decimal fixed point' },
+            lockedZDisplay: { type: 'string' },
+            claimed: { type: 'boolean' },
+            error: { type: 'string' },
+          },
+        },
+      },
+    },
+  },
+}
+
 export async function GET(request: NextRequest) {
-  const paymentError = await requirePayment(request, '$0.01', 'Bet positions for a bettor on a market')
+  const paymentError = await requirePayment(request, '$0.01', RESOURCE)
   if (paymentError) return paymentError
 
   const { searchParams } = new URL(request.url)

@@ -4,7 +4,7 @@ import { serverPublicClient } from '@/lib/server-client'
 import { marketAbi, factoryAbi } from '@/lib/contracts'
 import { FACTORY_ADDRESS } from '@/lib/chain'
 import { formatZDisplay } from '@/lib/format'
-import { requirePayment } from '@/lib/x402-server'
+import { requirePayment, type PaidResource } from '@/lib/x402-server'
 import { quoteMarketEV } from '@/lib/payout'
 
 export const dynamic = 'force-dynamic'
@@ -12,8 +12,44 @@ export const dynamic = 'force-dynamic'
 const FEE_PERCENT = BigInt(200) // bps — matches SportsbookMarket.FEE_PERCENT (2%)
 const MIN_STAKE = BigInt(1_000_000) // 1 USDC, 6 decimals
 
+const RESOURCE: PaidResource = {
+  description:
+    'Quote one Even Steven bet: the even-money payout at liquidity, the early line you would lock right now, and the flat 2% fee on stake paid upfront.',
+  inputSchema: {
+    queryParams: {
+      gameId: 'Market gameId, e.g. NFL-2026-01-15-HOME-Chiefs-AWAY-49ers',
+      side: '"home" or "away"',
+      stake: 'Stake in USDC as a decimal string, minimum 1 (e.g. "100")',
+    },
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      marketAddress: { type: 'string' },
+      gameId: { type: 'string' },
+      side: { type: 'string', enum: ['home', 'away'] },
+      greaterThan: { type: 'boolean', description: 'true for home' },
+      stake: { type: 'string', description: 'USDC 6-decimals' },
+      fee: { type: 'string', description: '2% of stake, paid upfront on top of it' },
+      totalCost: { type: 'string', description: 'stake + fee: the amount to authorize' },
+      currentZ: { type: 'string', description: 'Line you would lock now, 4-decimal fixed point' },
+      currentZDisplay: { type: 'string' },
+      ev: {
+        type: 'object',
+        properties: {
+          currentPayout: { type: 'string', description: 'Gross payout at the current pools' },
+          liquidPayout: { type: 'string', description: 'Gross payout at liquidity: exactly 2x stake' },
+          impliedVig: { type: 'string', description: 'Fee in bps (200 = 2%)' },
+          netProfitAtLiquidity: { type: 'string', description: 'liquidPayout - totalCost' },
+        },
+      },
+      note: { type: 'string' },
+    },
+  },
+}
+
 export async function GET(request: NextRequest) {
-  const paymentError = await requirePayment(request, '$0.01', 'EV quote for a gameId/side/stake')
+  const paymentError = await requirePayment(request, '$0.01', RESOURCE)
   if (paymentError) return paymentError
 
   const { searchParams } = new URL(request.url)

@@ -3,7 +3,7 @@ import { serverPublicClient } from '@/lib/server-client'
 import { marketAbi, factoryAbi } from '@/lib/contracts'
 import { FACTORY_ADDRESS } from '@/lib/chain'
 import { formatZDisplay } from '@/lib/format'
-import { requirePayment } from '@/lib/x402-server'
+import { requirePayment, type PaidResource } from '@/lib/x402-server'
 import { quoteMarketEV } from '@/lib/payout'
 
 export const dynamic = 'force-dynamic'
@@ -39,8 +39,56 @@ type AgentMarketError = {
   error: string
 }
 
+const EV_SIDE_SCHEMA = {
+  type: 'object',
+  properties: {
+    currentPayout: { type: 'string', description: 'Gross payout for referenceStake at the current pools, USDC 6-decimals' },
+    liquidPayout: { type: 'string', description: 'Gross payout at liquidity: exactly 2x referenceStake' },
+    impliedVig: { type: 'string', description: 'Taker fee on stake in bps, paid upfront (200 = 2%)' },
+  },
+}
+
+const RESOURCE: PaidResource = {
+  description:
+    'Live snapshot of every open Even Steven sports market on Base: even-money payouts at liquidity, the early line you lock when you bet, and a flat 2% fee on stake paid upfront.',
+  outputSchema: {
+    type: 'object',
+    properties: {
+      markets: {
+        type: 'array',
+        description: 'Open markets; an entry with only marketAddress + error failed to read',
+        items: {
+          type: 'object',
+          properties: {
+            marketAddress: { type: 'string', description: 'Market contract address' },
+            gameId: { type: 'string', description: 'SPORT-YYYY-MM-DD-HOME-Team-AWAY-Team' },
+            currentZ: { type: 'string', description: 'Current line, 4-decimal fixed point (-35000 = -3.5)' },
+            currentZDisplay: { type: 'string', description: 'Current line, human-readable' },
+            greaterPool: { type: 'string', description: 'Home-side pool, USDC 6-decimals' },
+            lessEqualPool: { type: 'string', description: 'Away-side pool, USDC 6-decimals' },
+            totalPool: { type: 'string', description: 'Total pool, USDC 6-decimals' },
+            isOpen: { type: 'boolean' },
+            isSettled: { type: 'boolean' },
+            ev: {
+              type: 'object',
+              properties: {
+                referenceStake: { type: 'string', description: '100 USDC (100000000)' },
+                home: EV_SIDE_SCHEMA,
+                away: EV_SIDE_SCHEMA,
+              },
+            },
+            error: { type: 'string' },
+          },
+        },
+      },
+      relay: { type: 'object', description: 'Pointers to POST /api/bet and the quote/status endpoints' },
+      timestamp: { type: 'number', description: 'Unix time in ms' },
+    },
+  },
+}
+
 export async function GET(request: NextRequest) {
-  const paymentError = await requirePayment(request, '$0.05', 'Live on-chain snapshot of all open markets')
+  const paymentError = await requirePayment(request, '$0.05', RESOURCE)
   if (paymentError) return paymentError
 
   const openMarkets = await serverPublicClient.readContract({
