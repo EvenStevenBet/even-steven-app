@@ -167,6 +167,7 @@ export default function BetsPage() {
     <main className="max-w-3xl mx-auto px-4 py-12 space-y-10">
       <header className="space-y-1">
         <h1 className="font-display text-3xl font-bold">My Bets</h1>
+        {address && <YourPoints address={address} />}
         {loading && (
           <p className="text-xs text-white/40 tabular">
             Scanning markets… {scannedCount}/{totalCount}
@@ -244,6 +245,44 @@ export default function BetsPage() {
         </>
       )}
     </main>
+  )
+}
+
+interface PointsSummary {
+  total: number
+  betPoints: number
+  referralPoints: number
+  rank: number | null
+}
+
+function YourPoints({ address }: { address: string }) {
+  const [points, setPoints] = useState<PointsSummary | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    setPoints(null)
+    fetch(`/api/points?address=${address}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: PointsSummary | null) => {
+        if (!cancelled) setPoints(data)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [address])
+
+  if (!points) return null
+  return (
+    <p className="text-sm text-white/60 tabular">
+      Your points: <span className="text-gold font-semibold">{points.total.toLocaleString('en-US')}</span>
+      <span className="text-white/35">
+        {' '}· {points.betPoints.toLocaleString('en-US')} from bets, {points.referralPoints.toLocaleString('en-US')} from referrals
+        {points.rank !== null && ` · #${points.rank}`}
+      </span>{' '}
+      <Link href="/points" className="text-xs text-gold/80 underline underline-offset-2">
+        Leaderboard
+      </Link>
+    </p>
   )
 }
 
