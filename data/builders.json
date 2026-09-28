@@ -1,1 +1,3 @@
-[]
+[
+  { "code": "jeff-test", "payoutAddress": "0x6cF0A0b5282409E24dC35e2c1834f9111315603B", "approved": true, "label": "live test, remove before merge" }
+]
