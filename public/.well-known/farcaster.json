@@ -4,14 +4,22 @@
     "payload": "PLACEHOLDER",
     "signature": "PLACEHOLDER"
   },
-  "frame": {
+  "miniapp": {
     "version": "1",
     "name": "Even Steven",
-    "iconUrl": "https://evensteven.bet/icon.png",
     "homeUrl": "https://evensteven.bet",
-    "imageUrl": "https://evensteven.bet/opengraph-image",
+    "iconUrl": "https://evensteven.bet/icon.png",
     "splashImageUrl": "https://evensteven.bet/splash.png",
     "splashBackgroundColor": "#0a0a0a",
-    "webhookUrl": "https://evensteven.bet/api/webhook"
+    "subtitle": "Bet $100, win $100",
+    "description": "Parimutuel sports betting on Base. Winners split the losers' stakes, so at liquidity $100 wins $100. Lock your line early. 2% fee on your stake, paid upfront.",
+    "tagline": "Even betting. Flat 2% fee.",
+    "primaryCategory": "entertainment",
+    "tags": ["sports", "betting", "nfl", "parimutuel", "base"],
+    "heroImageUrl": "https://evensteven.bet/opengraph-image",
+    "ogTitle": "Even Steven",
+    "ogDescription": "At liquidity, $100 wins $100. Lock your line early. 2% fee on your stake, paid upfront.",
+    "ogImageUrl": "https://evensteven.bet/opengraph-image",
+    "requiredChains": ["eip155:8453"]
   }
 }
