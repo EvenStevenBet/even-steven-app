@@ -283,6 +283,12 @@ function ActiveBetCard({ bet }: { bet: WalletBet }) {
           Current line: <span className="text-white/70">{formatSpread(bet.currentZ, side)}</span>
         </span>
       </div>
+      <div className="pt-1">
+        <ShareButton
+          text={`I locked ${side === 'home' ? bet.market.parsedHome : bet.market.parsedAway} ${formatSpread(bet.lockedZ, side)} on Even Steven. Tail or fade?`}
+          path={`/bet/${bet.market.marketAddress}/${bet.betId}`}
+        />
+      </div>
     </div>
   )
 }
@@ -388,7 +394,7 @@ function HistoryBetCard({ bet }: { bet: WalletBet }) {
         <div className="pt-1">
           <ShareButton
             text={`I won ${formatUsdc(bet.payout)} USDC on ${side === 'home' ? bet.market.parsedHome : bet.market.parsedAway} ${formatSpread(bet.lockedZ, side)} on Even Steven.`}
-            path={`/market/${bet.market.gameId}`}
+            path={`/bet/${bet.market.marketAddress}/${bet.betId}`}
           />
         </div>
       )}

@@ -2,8 +2,11 @@ import { ImageResponse } from 'next/og'
 import type { MarketRow } from '@/lib/markets'
 import { enrichMarket } from '@/lib/markets'
 import { APP_URL } from '@/lib/chain'
+import { serverPublicClient } from '@/lib/server-client'
+import { marketAbi } from '@/lib/contracts'
+import { favoriteHeadline } from '@/lib/line'
 
-export const runtime = 'edge'
+export const revalidate = 60
 export const alt = 'Even Steven market'
 export const size = { width: 1200, height: 630 }
 export const contentType = 'image/png'
@@ -31,7 +34,18 @@ export default async function MarketOgImage({ params }: Props) {
   const home  = market?.parsedHome  ?? 'Home'
   const away  = market?.parsedAway  ?? 'Away'
   const sport = market?.parsedSport ?? 'Game'
-  const line  = market?.openLine    ?? ''
+  // The live line from chain; the CSV openLine column is empty for bot-opened markets.
+  let line = ''
+  if (market?.marketAddress) {
+    try {
+      const state = await serverPublicClient.readContract({
+        address: market.marketAddress as `0x${string}`, abi: marketAbi, functionName: 'getMarketState',
+      })
+      line = favoriteHeadline(state[1], home, away)
+    } catch {
+      // Unreadable market: render the matchup without a line rather than fail the image.
+    }
+  }
 
   return new ImageResponse(
     (
@@ -88,7 +102,7 @@ export default async function MarketOgImage({ params }: Props) {
                 letterSpacing: '2px',
               }}
             >
-              LINE {line}
+              {line}
             </div>
           )}
         </div>

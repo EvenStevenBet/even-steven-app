@@ -23,6 +23,7 @@ import { refDataSuffix } from '@/lib/attribution'
 import { getStoredRef } from '@/lib/share-ref'
 import { Countdown } from '@/components/Countdown'
 import { FirstMoverBadge } from '@/components/FirstMoverBadge'
+import { ShareButton } from '@/components/ShareButton'
 
 const MIN_STAKE = BigInt(1_000_000) // 1 USDC, 6 decimals
 const FEE_BPS = BigInt(200)         // 2% — matches FEE_PERCENT on-chain (CLAUDE.md)
@@ -645,6 +646,16 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
         >
           View transaction on BaseScan →
         </a>
+      )}
+
+      {step === 'success' && successBetId !== null && lockedZAtPlacement !== null && sideAtPlacement !== null && (
+        <div className="space-y-1.5">
+          <p className="text-[10px] text-white/40 uppercase tracking-widest font-display">Share — friends tail or fade</p>
+          <ShareButton
+            text={`I locked ${sideAtPlacement === 'home' ? homeTeam : awayTeam} ${formatSpread(lockedZAtPlacement, sideAtPlacement)} on Even Steven. Tail or fade?`}
+            path={`/bet/${marketAddress}/${successBetId}`}
+          />
+        </div>
       )}
 
       {/* Submit / connect */}

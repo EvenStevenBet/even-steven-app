@@ -30,6 +30,14 @@ export function resolveRef(raw: unknown): ResolvedRef | null {
   return payoutAddress ? { type: 'builder', id: ref, payoutAddress } : null
 }
 
+/** The ref a share link carries for this wallet: its builder code if it has one, else the address. */
+export function refForSharer(wallet: Address): string {
+  for (const [code, payoutAddress] of approvedBuilders) {
+    if (payoutAddress === getAddress(wallet)) return code
+  }
+  return wallet.toLowerCase()
+}
+
 /** resolveRef, minus self-referral: a ref that pays the bettor is no ref. */
 export function resolveRefForBettor(raw: unknown, bettor: Address): ResolvedRef | null {
   const ref = resolveRef(raw)
