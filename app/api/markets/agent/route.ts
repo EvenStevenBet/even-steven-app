@@ -81,7 +81,7 @@ const RESOURCE: PaidResource = {
           },
         },
       },
-      relay: { type: 'object', description: 'Pointers to POST /api/bet and the quote/status endpoints' },
+      relay: { type: 'object', description: 'Pointers to POST /api/bet, POST /api/claim and the quote/status endpoints' },
       timestamp: { type: 'number', description: 'Unix time in ms' },
     },
   },
@@ -161,6 +161,7 @@ export async function GET(request: NextRequest) {
       note: 'Place bets via POST /api/bet — see AGENTS.md for the full relay guide.',
       quoteEndpoint: 'GET /api/bet/quote',
       statusEndpoint: 'GET /api/bet/status',
+      claimEndpoint: 'POST /api/claim',
     },
     timestamp: Date.now(),
   })
