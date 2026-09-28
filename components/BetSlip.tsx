@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { BaseError, decodeEventLog, encodeFunctionData, parseUnits } from 'viem'
+import { BaseError, concat, decodeEventLog, encodeFunctionData, parseUnits } from 'viem'
 import {
   useAccount,
   useCallsStatus,
@@ -19,6 +19,8 @@ import { favoriteHeadline, formatSpread, lineSentence, outcomeText } from '@/lib
 import type { Side } from '@/lib/line'
 import { isFirstMoverMarket, stakedPool } from '@/lib/pool'
 import { quoteMarketEV } from '@/lib/payout'
+import { refDataSuffix } from '@/lib/attribution'
+import { getStoredRef } from '@/lib/share-ref'
 import { Countdown } from '@/components/Countdown'
 import { FirstMoverBadge } from '@/components/FirstMoverBadge'
 
@@ -80,6 +82,22 @@ const STEP_LABEL: Record<Step, string> = {
   error: 'Something went wrong.',
 }
 
+// Tells the server a web bet landed so it can record who referred it. Best effort:
+// retried while the receipt may not be indexed yet, never surfaced to the bettor.
+async function reportAttribution(txHash: string) {
+  for (const delayMs of [0, 3000, 8000]) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs))
+    try {
+      const res = await fetch('/api/attribution', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ txHash }),
+      })
+      if (res.status !== 404 && res.status < 500) return
+    } catch {}
+  }
+}
+
 // Debounced so the EV / market-state reads don't refetch on every keystroke —
 // typing "1000" would otherwise fire four rounds of RPC calls.
 function useDebouncedValue<T>(value: T, delayMs: number): T {
@@ -113,6 +131,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
   const [step, setStep] = useState<Step>('idle')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [successTxHash, setSuccessTxHash] = useState<`0x${string}` | null>(null)
+  const [successBetId, setSuccessBetId] = useState<bigint | null>(null)
   const [lockedZAtPlacement, setLockedZAtPlacement] = useState<bigint | null>(null)
   const [sideAtPlacement, setSideAtPlacement] = useState<Side | null>(null)
   const [pendingCallsId, setPendingCallsId] = useState<string | null>(null)
@@ -127,10 +146,21 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
     setStep('idle')
     setErrorMessage(null)
     setSuccessTxHash(null)
+    setSuccessBetId(null)
     setLockedZAtPlacement(null)
     setSideAtPlacement(null)
     setPendingCallsId(null)
   }, [address])
+
+  // Share links preselect a side: /market/<gameId>?side=home|away
+  useEffect(() => {
+    const preset = new URLSearchParams(window.location.search).get('side')
+    if (preset === 'home' || preset === 'away') setSide(preset)
+  }, [])
+
+  useEffect(() => {
+    if (step === 'success' && successTxHash) reportAttribution(successTxHash)
+  }, [step, successTxHash])
 
   // Smart-wallet path only: poll the sendCalls bundle until its receipts land,
   // then pull the real tx hash out of them — sendCalls itself never returns one.
@@ -258,6 +288,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
     setStep('idle')
     setErrorMessage(null)
     setSuccessTxHash(null)
+    setSuccessBetId(null)
     setLockedZAtPlacement(null)
     setSideAtPlacement(null)
     setPendingCallsId(null)
@@ -271,6 +302,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
 
     if (callsStatus.status === 'success') {
       let txHash: `0x${string}` | undefined
+      let betTxHash: `0x${string}` | undefined
       for (const receipt of callsStatus.receipts ?? []) {
         txHash = receipt.transactionHash
         for (const log of receipt.logs) {
@@ -283,13 +315,15 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
             })
             if (decoded.eventName === 'BetPlaced') {
               setLockedZAtPlacement(decoded.args.lockedZ)
+              setSuccessBetId(decoded.args.betId)
+              betTxHash = receipt.transactionHash
             }
           } catch {
             // skip unrelated logs
           }
         }
       }
-      if (txHash) setSuccessTxHash(txHash)
+      if (betTxHash ?? txHash) setSuccessTxHash(betTxHash ?? txHash!)
       setStep('success')
       setPendingCallsId(null)
       refetchBalance()
@@ -305,6 +339,11 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
     if (!address || stakeBigInt === null || totalCost === null || side === null) return
     setErrorMessage(null)
     setSuccessTxHash(null)
+    setSuccessBetId(null)
+    // Ref from a share link, carried as an ERC-8021 calldata suffix the market ignores.
+    // A bettor's own address is never their ref.
+    const ref = getStoredRef()
+    const dataSuffix = ref && ref !== address.toLowerCase() ? refDataSuffix(ref) : undefined
     // Remembered because `side` is cleared on reset, and the confirmation has
     // to describe the bet that was actually placed.
     setSideAtPlacement(side)
@@ -318,11 +357,12 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
           functionName: 'approve',
           args: [marketAddress, MAX_UINT256],
         })
-        const betCalldata = encodeFunctionData({
+        const placeBetCalldata = encodeFunctionData({
           abi: marketAbi,
           functionName: 'placeBet',
           args: [side === 'home', stakeBigInt],
         })
+        const betCalldata = dataSuffix ? concat([placeBetCalldata, dataSuffix]) : placeBetCalldata
         const paymasterUrl = process.env.NEXT_PUBLIC_PAYMASTER_URL
 
         const { id } = await sendCallsAsync({
@@ -386,6 +426,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
         functionName: 'placeBet',
         args: [side === 'home', stakeBigInt],
         account: address,
+        dataSuffix,
       })
       const betHash = await writeContractAsync({
         address: marketAddress,
@@ -393,6 +434,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
         functionName: 'placeBet',
         args: [side === 'home', stakeBigInt],
         gas: withGasBuffer(betGasEstimate),
+        dataSuffix,
       })
       setStep('confirming_bet')
       const betReceipt = await publicClient.waitForTransactionReceipt({ hash: betHash })
@@ -411,6 +453,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
           })
           if (decoded.eventName === 'BetPlaced') {
             setLockedZAtPlacement(decoded.args.lockedZ)
+            setSuccessBetId(decoded.args.betId)
             break
           }
         } catch {

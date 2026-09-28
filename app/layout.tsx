@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from 'next'
 import { Oswald, Inter } from 'next/font/google'
 import { Providers } from './providers'
 import { Header } from '@/components/Header'
+import { RefCapture } from '@/components/RefCapture'
 import './globals.css'
 
 const oswald = Oswald({
@@ -57,6 +58,7 @@ export default function RootLayout({
     <html lang="en" className={`${oswald.variable} ${inter.variable}`}>
       <body className="min-h-dvh bg-bg text-white font-body antialiased">
         <Providers>
+          <RefCapture />
           <Header />
           <div className="flex flex-col min-h-[calc(100dvh-3.5rem)]">
             {children}

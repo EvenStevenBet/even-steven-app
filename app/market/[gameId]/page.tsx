@@ -1,5 +1,6 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
+import { permanentRedirect } from 'next/navigation'
 import { enrichMarket } from '@/lib/markets'
 import type { MarketRow } from '@/lib/markets'
 import { APP_URL } from '@/lib/chain'
@@ -11,14 +12,20 @@ export const revalidate = 60
 
 interface Props {
   params: Promise<{ gameId: string }>
+  searchParams: Promise<Record<string, string | string[] | undefined>>
 }
 
-async function getMarket(gameId: string) {
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/
+
+async function getMarket(gameIdOrAddress: string) {
   try {
     const res = await fetch(`${APP_URL}/api/markets`, { next: { revalidate: 60 } })
     if (!res.ok) return null
     const data: MarketRow[] = await res.json()
-    const row = data.find(m => m.gameId === decodeURIComponent(gameId))
+    const key = decodeURIComponent(gameIdOrAddress)
+    const row = ADDRESS.test(key)
+      ? data.find(m => m.marketAddress.toLowerCase() === key.toLowerCase())
+      : data.find(m => m.gameId === key)
     return row ? enrichMarket(row) : null
   } catch {
     return null
@@ -38,9 +45,20 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   }
 }
 
-export default async function MarketPage({ params }: Props) {
+export default async function MarketPage({ params, searchParams }: Props) {
   const { gameId } = await params
   const market = await getMarket(gameId)
+
+  // /market/<address> is accepted but /market/<gameId> is canonical. searchParams is read
+  // only on this branch so gameId pages stay statically cached.
+  if (market && ADDRESS.test(decodeURIComponent(gameId))) {
+    const query = new URLSearchParams()
+    for (const [k, v] of Object.entries(await searchParams)) {
+      if (typeof v === 'string') query.set(k, v)
+    }
+    const qs = query.toString()
+    permanentRedirect(`/market/${encodeURIComponent(market.gameId)}${qs ? `?${qs}` : ''}`)
+  }
 
   if (!market) {
     return (
