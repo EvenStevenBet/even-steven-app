@@ -7,6 +7,7 @@ import { APP_URL } from '@/lib/chain'
 import { BetSlip } from '@/components/BetSlip'
 import { PoolTotal } from '@/components/PoolTotal'
 import { formatMarketDate } from '@/lib/format'
+import { LocalDate } from '@/components/LocalDate'
 
 export const revalidate = 60
 
@@ -71,9 +72,6 @@ export default async function MarketPage({ params, searchParams }: Props) {
     )
   }
 
-  const kickoff = formatMarketDate(market.gameDate || market.parsedDate, {
-    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
-  })
 
   return (
     <main className="max-w-2xl mx-auto px-4 py-12 space-y-8">
@@ -93,7 +91,11 @@ export default async function MarketPage({ params, searchParams }: Props) {
           <span className="block text-white/40 text-2xl sm:text-3xl mt-1">vs {market.parsedAway}</span>
         </h1>
         <p className="text-white/50 text-sm tabular">
-          {kickoff}
+          <LocalDate
+            value={market.gameDate || market.parsedDate}
+            options={{ weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }}
+            withTime
+          />
           {market.gameNumber && ` · Game ${market.gameNumber}`}
         </p>
       </header>
@@ -115,7 +117,7 @@ export default async function MarketPage({ params, searchParams }: Props) {
           </p>
           {formatMarketDate(market.bettingOpensAt, { month: 'long', day: 'numeric' }) && (
             <p className="text-sm text-white/40 tabular">
-              Opens {formatMarketDate(market.bettingOpensAt, { month: 'long', day: 'numeric' })}
+              <LocalDate value={market.bettingOpensAt} options={{ month: 'long', day: 'numeric' }} prefix="Opens " />
             </p>
           )}
         </div>

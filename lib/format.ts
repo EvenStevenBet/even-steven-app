@@ -55,3 +55,22 @@ export function formatMarketDate(
   const d = parseMarketDate(value)
   return d === null ? null : d.toLocaleDateString('en-US', { timeZone: 'UTC', ...options })
 }
+
+/**
+ * The same value in the viewer's own timezone (browser only). A full instant gets the local
+ * weekday/date and, with withTime, the local time and zone ("Monday, September 28 · 5:15 PM PDT").
+ * A bare day ("2026-09-06") is a calendar date, not an instant, so it stays as-is.
+ */
+export function formatLocalDate(
+  value: string | undefined | null,
+  options: Intl.DateTimeFormatOptions,
+  withTime = false,
+): string | null {
+  const d = parseMarketDate(value)
+  if (d === null) return null
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value!.trim())) return formatMarketDate(value, options)
+  const date = d.toLocaleDateString('en-US', options)
+  if (!withTime) return date
+  const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })
+  return `${date} · ${time}`
+}
