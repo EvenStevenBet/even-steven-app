@@ -340,10 +340,13 @@ async function runAutoTests({ M, MC, Y, R, relay, redis }) {
     const r = await post('/api/claim/auto', undefined, { authorization: `Bearer ${CRON_SECRET}` })
     const claims = r.json?.claims ?? []
     check('D2 cron: 200', r.status === 200, JSON.stringify(r.json))
-    check('D2 cron: claims the remaining winner and the refund', claims.length === 2 &&
+    // Real settled v1.6 markets in the forked state may add claims of their own,
+    // so require the fixture's two claims rather than an exact count.
+    check('D2 cron: claims the remaining winner and the refund',
       claims.some((c) => c.bettor === Y.address && getAddress(c.marketAddress) === getAddress(M)) &&
       claims.some((c) => c.bettor === R.address && getAddress(c.marketAddress) === getAddress(MC)), JSON.stringify(claims))
-    check('D2 cron: two txs', (await claimTxCount(relay)) === n0 + 2)
+    check('D2 cron: no errors', (r.json?.errors ?? []).length === 0, JSON.stringify(r.json?.errors))
+    check('D2 cron: one tx per claim', (await claimTxCount(relay)) === n0 + claims.length, `${claims.length} claims`)
     check('D2 cron: winner paid', (await usdc(Y.address)) > yBefore)
     check('D2 cron: refund paid in full (7 USDC stake)', (await usdc(R.address)) - rBefore === U(7))
   }
