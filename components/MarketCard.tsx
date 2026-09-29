@@ -2,6 +2,7 @@ import Link from 'next/link'
 import type { ParsedMarket } from '@/lib/markets'
 import { favoriteQuote } from '@/lib/line'
 import { formatMarketDate } from '@/lib/format'
+import { LocalDate } from '@/components/LocalDate'
 import { isFirstMoverMarket } from '@/lib/pool'
 import { FirstMoverBadge } from '@/components/FirstMoverBadge'
 
@@ -86,10 +87,7 @@ function CurrentLine({ market, currentZ }: Props) {
 }
 
 function ComingSoonCard({ market }: Props) {
-  const opens = formatMarketDate(market.bettingOpensAt, {
-    weekday: 'short', month: 'short', day: 'numeric',
-  })
-  const opensLabel = opens ? `Betting opens ${opens}` : 'Betting opens soon'
+  const hasOpens = formatMarketDate(market.bettingOpensAt, { month: 'short' }) !== null
 
   return (
     <div className="ticket p-5 opacity-70 select-none">
@@ -101,18 +99,22 @@ function ComingSoonCard({ market }: Props) {
 
       <div className="mt-4 flex items-center justify-between gap-2 text-xs text-white/40">
         <GameDate market={market} />
-        <span className="text-white/40 font-display uppercase tracking-wider text-right">{opensLabel}</span>
+        <span className="text-white/40 font-display uppercase tracking-wider text-right">
+          {hasOpens ? (
+            <LocalDate value={market.bettingOpensAt} options={{ weekday: 'short', month: 'short', day: 'numeric' }} prefix="Betting opens " />
+          ) : (
+            'Betting opens soon'
+          )}
+        </span>
       </div>
     </div>
   )
 }
 
 function GameDate({ market }: { market: ParsedMarket }) {
-  const label = formatMarketDate(market.gameDate || market.parsedDate, {
-    weekday: 'short', month: 'short', day: 'numeric',
-  })
-  if (!label) return <span />
-  return <time dateTime={market.parsedDate}>{label}</time>
+  const value = market.gameDate || market.parsedDate
+  if (!formatMarketDate(value, { month: 'short' })) return <span />
+  return <LocalDate value={value} options={{ weekday: 'short', month: 'short', day: 'numeric' }} withTime />
 }
 
 function SportTag({ sport }: { sport: string }) {
