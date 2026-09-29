@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { BaseError, concat, decodeEventLog, encodeFunctionData, parseUnits } from 'viem'
 import {
   useAccount,
@@ -13,7 +13,7 @@ import {
 } from 'wagmi'
 import { USDC_ADDRESS, BASESCAN_URL } from '@/lib/chain'
 import { marketAbi, erc20Abi } from '@/lib/contracts'
-import { useIsSmartWallet } from '@/lib/useSmartWallet'
+import { useWalletCapabilities } from '@/lib/useSmartWallet'
 import { formatStakeToPayout, formatUsdc } from '@/lib/format'
 import { favoriteHeadline, formatSpread, lineSentence, outcomeText } from '@/lib/line'
 import type { Side } from '@/lib/line'
@@ -34,6 +34,12 @@ const REFERENCE_STAKE = BigInt(100_000_000) // 100 USDC
 // slip left sitting open goes stale on its own. Poll while betting is open.
 // Human-UI only: agents read getMarketEV directly before every bet.
 const POLL_MS = 15_000
+// Some wallets accept wallet_sendCalls but never report the result through
+// wallet_getCallsStatus. After this long without a status (or at once, if the status call
+// errors) the slip confirms from the chain instead, and gives up with a clear message after
+// STATUS_GIVE_UP_MS rather than spinning forever and inviting a duplicate bet.
+const STATUS_GRACE_MS = 45_000
+const STATUS_GIVE_UP_MS = 180_000
 // Circle USDC on Base requires max approval — exact amounts fail intermittently (CLAUDE.md).
 const MAX_UINT256 = (BigInt(1) << BigInt(256)) - BigInt(1)
 
@@ -124,7 +130,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
   const publicClient = usePublicClient()
   const { writeContractAsync } = useWriteContract()
   const { connect, connectors, isPending: isConnecting, error: connectError, variables: connectVariables } = useConnect()
-  const isSmartWallet = useIsSmartWallet()
+  const { isSmartWallet, paymaster: paymasterSupported } = useWalletCapabilities()
   const { sendCallsAsync } = useSendCalls()
 
   const [side, setSide] = useState<Side | null>(null)
@@ -136,6 +142,8 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
   const [lockedZAtPlacement, setLockedZAtPlacement] = useState<bigint | null>(null)
   const [sideAtPlacement, setSideAtPlacement] = useState<Side | null>(null)
   const [pendingCallsId, setPendingCallsId] = useState<string | null>(null)
+  const betCountBefore = useRef<number | null>(null)
+  const callsSentAt = useRef(0)
 
   // A different wallet connecting (or the same wallet reconnecting) should not
   // show the previous session's result. Also clears pendingCallsId so a
@@ -165,7 +173,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
 
   // Smart-wallet path only: poll the sendCalls bundle until its receipts land,
   // then pull the real tx hash out of them — sendCalls itself never returns one.
-  const { data: callsStatus } = useCallsStatus({
+  const { data: callsStatus, error: callsStatusError } = useCallsStatus({
     id: pendingCallsId ?? '',
     query: {
       enabled: pendingCallsId !== null,
@@ -336,6 +344,45 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
     }
   }, [callsStatus, pendingCallsId, refetchBalance, refetchMarketState])
 
+  // Chain-side confirmation for wallets that don't report sendCalls status: the bettor's bet
+  // count on this market grows by one when the batch lands.
+  useEffect(() => {
+    if (pendingCallsId === null || !publicClient || !address) return
+    let cancelled = false
+    const timer = setInterval(async () => {
+      const elapsed = Date.now() - callsSentAt.current
+      if (!callsStatusError && elapsed < STATUS_GRACE_MS) return
+      try {
+        const ids = await publicClient.readContract({
+          address: marketAddress, abi: marketAbi, functionName: 'getBetsByAddress', args: [address],
+        })
+        if (cancelled) return
+        const before = betCountBefore.current
+        if (before !== null && ids.length > before) {
+          const betId = ids[ids.length - 1]
+          const bet = await publicClient.readContract({ address: marketAddress, abi: marketAbi, functionName: 'getBet', args: [betId] })
+          if (cancelled) return
+          setLockedZAtPlacement(bet.lockedZ)
+          setSuccessBetId(betId)
+          setStep('success')
+          setPendingCallsId(null)
+          refetchBalance()
+          refetchMarketState()
+        } else if (elapsed > STATUS_GIVE_UP_MS) {
+          setStep('error')
+          setErrorMessage("Your wallet didn't report whether the bet went through. Check My Bets before trying again.")
+          setPendingCallsId(null)
+        }
+      } catch {
+        // transient read failure: try again on the next tick
+      }
+    }, 3000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [pendingCallsId, callsStatusError, publicClient, address, marketAddress, refetchBalance, refetchMarketState])
+
   async function handleSubmit() {
     if (!address || stakeBigInt === null || totalCost === null || side === null) return
     setErrorMessage(null)
@@ -366,14 +413,34 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
         const betCalldata = dataSuffix ? concat([placeBetCalldata, dataSuffix]) : placeBetCalldata
         const paymasterUrl = process.env.NEXT_PUBLIC_PAYMASTER_URL
 
+        betCountBefore.current = null
+        if (publicClient) {
+          try {
+            const ids = await publicClient.readContract({
+              address: marketAddress, abi: marketAbi, functionName: 'getBetsByAddress', args: [address],
+            })
+            betCountBefore.current = ids.length
+          } catch {
+            // without a baseline the chain-side fallback can only time out, never misreport
+          }
+        }
+
+        // Only attach the paymaster when the wallet says it supports one, and mark it
+        // optional: a wallet must reject the whole batch over a required capability it
+        // lacks (EIP-5792) — the likely cause of the Base App bet failures.
+        const sponsor = paymasterUrl && paymasterSupported
+          ? { capabilities: { paymasterService: { url: paymasterUrl, optional: true } } }
+          : {}
+
         const { id } = await sendCallsAsync({
           calls: [
             { to: USDC_ADDRESS, data: approveCalldata },
             { to: marketAddress, data: betCalldata },
           ],
-          ...(paymasterUrl ? { capabilities: { paymasterService: { url: paymasterUrl } } } : {}),
+          ...sponsor,
         })
 
+        callsSentAt.current = Date.now()
         setStep('confirming_batch')
         setPendingCallsId(id)
       } catch (err) {
@@ -694,7 +761,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
             disabled={!canSubmit}
             className="btn-gold w-full"
           >
-            {busy ? STEP_LABEL[step] : isSmartWallet ? 'Place bet (gasless)' : 'Place bet'}
+            {busy ? STEP_LABEL[step] : isSmartWallet && paymasterSupported ? 'Place bet (gasless)' : 'Place bet'}
           </button>
           {!isSmartWallet && (
             <p className="text-[10px] text-white/30 text-center">
