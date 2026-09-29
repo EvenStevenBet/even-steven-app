@@ -2,28 +2,50 @@
 
 import { useAccount, useCapabilities } from 'wagmi'
 
-// EIP-5792 atomic batch support (wallet_sendCalls) for the connected account on
-// the current chain. 'supported' and 'ready' (EIP-7702 upgrade pending user
-// approval — what Coinbase Smart Wallet reports for EOA-upgraded accounts on
-// Base) both count as true — but only for the Coinbase Wallet connector.
-// MetaMask/injected wallets have been observed reporting the capability
-// without actually supporting it, then failing sendCalls at execution with
-// "This Wallet does not support a capability that was not marked as
-// optional." — so the connector check gates the capability check, not just
-// the other way around. 'coinbaseWalletSDK' is the actual connector id in
-// the installed @wagmi/connectors version (not 'coinbaseWallet' — verify
-// against node_modules if this changes on a future upgrade). Never throws.
+// EIP-5792 capabilities of the connected wallet on the current chain.
+//
+// Atomic batching ('supported', or 'ready' for an EIP-7702 upgrade pending approval) is only
+// trusted from Coinbase's own wallets: MetaMask/injected wallets have been observed reporting
+// the capability without supporting it, then failing sendCalls at execution. "Coinbase's own"
+// means the Coinbase Wallet SDK connector ('coinbaseWalletSDK' in the installed
+// @wagmi/connectors), or the provider injected by the Base App / Coinbase Wallet in-app browser
+// — which the SDK connector itself hands back in that environment (isCoinbaseBrowser).
+//
+// paymaster is true only when the wallet itself reports paymasterService support. A wallet
+// must reject a whole sendCalls batch that carries a capability it doesn't support, so the
+// paymaster may only be attached when this is true.
 const COINBASE_WALLET_CONNECTOR_ID = 'coinbaseWalletSDK'
 
-export function useIsSmartWallet(): boolean {
+type InjectedFlags = { isCoinbaseWallet?: boolean; isCoinbaseBrowser?: boolean }
+
+export function isCoinbaseInjected(): boolean {
+  if (typeof window === 'undefined') return false
+  const eth = (window as { ethereum?: InjectedFlags }).ethereum
+  return Boolean(eth?.isCoinbaseWallet || eth?.isCoinbaseBrowser)
+}
+
+function isCoinbaseFamily(connectorId: string | undefined): boolean {
+  return connectorId === COINBASE_WALLET_CONNECTOR_ID || (connectorId === 'injected' && isCoinbaseInjected())
+}
+
+export interface WalletCapabilities {
+  isSmartWallet: boolean
+  paymaster: boolean
+}
+
+export function useWalletCapabilities(): WalletCapabilities {
   const { address, chainId, connector } = useAccount()
   const { data: capabilities } = useCapabilities({
     account: address,
     query: { enabled: Boolean(address) },
   })
 
-  if (connector?.id !== COINBASE_WALLET_CONNECTOR_ID) return false
+  if (!isCoinbaseFamily(connector?.id)) return { isSmartWallet: false, paymaster: false }
 
-  const status = chainId ? capabilities?.[chainId]?.atomic?.status : undefined
-  return status === 'supported' || status === 'ready'
+  const caps = chainId ? capabilities?.[chainId] : undefined
+  const status = caps?.atomic?.status
+  return {
+    isSmartWallet: status === 'supported' || status === 'ready',
+    paymaster: caps?.paymasterService?.supported === true,
+  }
 }
