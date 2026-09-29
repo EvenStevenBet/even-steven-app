@@ -1,4 +1,4 @@
-import { createConfig, http } from 'wagmi'
+import { createConfig, fallback, http } from 'wagmi'
 import { base, baseSepolia } from 'wagmi/chains'
 import { coinbaseWallet, injected, walletConnect } from 'wagmi/connectors'
 
@@ -6,9 +6,16 @@ const isTestnet = process.env.NEXT_PUBLIC_CHAIN === 'baseSepolia'
 const chain = isTestnet ? baseSepolia : base
 const alchemyKey = process.env.NEXT_PUBLIC_ALCHEMY_KEY
 
-function alchemyRpc(chainName: string) {
-  if (!alchemyKey) return undefined
-  return `https://${chainName}.g.alchemy.com/v2/${alchemyKey}` as const
+// Alchemy first, then the chain's public RPC. If the browser key is rate-limited, blocked by
+// an extension, or down, reads (the bet slip's market state, balances) keep working instead
+// of hanging on "Checking market status…". Wallet writes go through the wallet, not these.
+function transport(chainName: string, publicUrl: string) {
+  const publicRpc = http(publicUrl, { retryCount: 1, timeout: 10_000 })
+  if (!alchemyKey) return publicRpc
+  return fallback([
+    http(`https://${chainName}.g.alchemy.com/v2/${alchemyKey}`, { retryCount: 1, timeout: 8_000 }),
+    publicRpc,
+  ])
 }
 
 export const wagmiConfig = createConfig({
@@ -35,8 +42,8 @@ export const wagmiConfig = createConfig({
     }),
   ],
   transports: {
-    [base.id]:        http(alchemyRpc('base-mainnet')),
-    [baseSepolia.id]: http(alchemyRpc('base-sepolia')),
+    [base.id]:        transport('base-mainnet', 'https://mainnet.base.org'),
+    [baseSepolia.id]: transport('base-sepolia', 'https://sepolia.base.org'),
   },
 })
 
