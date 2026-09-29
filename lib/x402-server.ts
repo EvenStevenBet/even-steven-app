@@ -3,7 +3,8 @@ import { getAddress } from 'viem'
 import { exact } from 'x402/schemes'
 import { findMatchingPaymentRequirements, processPriceToAtomicAmount } from 'x402/shared'
 import { useFacilitator } from 'x402/verify'
-import type { Network, PaymentPayload, PaymentRequirements, Price } from 'x402/types'
+import { createFacilitatorConfig } from '@coinbase/x402'
+import type { FacilitatorConfig, HTTPRequestStructure, Network, PaymentPayload, PaymentRequirements, Price } from 'x402/types'
 
 // Inline x402 enforcement for App Router route handlers. Route handlers run
 // in the Node.js runtime (not Edge) by default, so — unlike middleware.ts,
@@ -12,7 +13,13 @@ import type { Network, PaymentPayload, PaymentRequirements, Price } from 'x402/t
 // @coinbase/cdp-sdk/axios dependency chain) into an Edge bundle at all.
 
 const X402_VERSION = 1
-const NETWORK: Network = 'base'
+const NETWORK: Network = process.env.NEXT_PUBLIC_CHAIN === 'baseSepolia' ? 'base-sepolia' : 'base'
+
+// x402.org's public facilitator only settles base-sepolia; mainnet needs CDP.
+// CDP rejects unauthenticated calls, and its JWTs are signed for exactly this
+// host + path, so with keys present the URL is always CDP_FACILITATOR_URL.
+const CDP_FACILITATOR_URL = 'https://api.cdp.coinbase.com/platform/v2/x402'
+const X402_ORG_FACILITATOR_URL = 'https://x402.org/facilitator'
 
 function getPayTo(): `0x${string}` {
   const payTo = process.env.X402_RECEIVING_ADDRESS
@@ -20,14 +27,43 @@ function getPayTo(): `0x${string}` {
   return payTo as `0x${string}`
 }
 
-function getFacilitatorUrl(): `${string}://${string}` {
-  return (process.env.X402_FACILITATOR_URL ?? 'https://x402.org/facilitator') as `${string}://${string}`
+let warnedUnauthenticatedCdp = false
+
+/**
+ * CDP_API_KEY_ID + CDP_API_KEY_SECRET set: the authenticated CDP facilitator,
+ * whatever X402_FACILITATOR_URL says. Unset: X402_FACILITATOR_URL, else the
+ * network default — so this deploys unchanged until the keys are added.
+ */
+function getFacilitator(): FacilitatorConfig {
+  const keyId = process.env.CDP_API_KEY_ID
+  const keySecret = process.env.CDP_API_KEY_SECRET
+  if (keyId && keySecret) return createFacilitatorConfig(keyId, keySecret)
+
+  const url = (process.env.X402_FACILITATOR_URL ||
+    (NETWORK === 'base' ? CDP_FACILITATOR_URL : X402_ORG_FACILITATOR_URL)) as `${string}://${string}`
+  if (url.startsWith('https://api.cdp.coinbase.com') && !warnedUnauthenticatedCdp) {
+    warnedUnauthenticatedCdp = true
+    console.error('[x402] CDP facilitator without CDP_API_KEY_ID / CDP_API_KEY_SECRET: every verify and settle will 401')
+  }
+  return { url }
+}
+
+/**
+ * A paid resource as the x402 Bazaar lists it. The description is also the
+ * 402 body's `description`; inputSchema/outputSchema are discovery metadata
+ * only and play no part in verifying or settling a payment.
+ */
+export type PaidResource = {
+  description: string
+  inputSchema?: Omit<HTTPRequestStructure, 'type' | 'method'>
+  outputSchema: Record<string, unknown>
 }
 
 async function buildPaymentRequirements(
   price: Price,
   resourceUrl: string,
-  description: string
+  method: HTTPRequestStructure['method'],
+  { description, inputSchema, outputSchema }: PaidResource
 ): Promise<PaymentRequirements[]> {
   const atomicAmount = processPriceToAtomicAmount(price, NETWORK)
   if ('error' in atomicAmount) throw new Error(atomicAmount.error)
@@ -41,6 +77,10 @@ async function buildPaymentRequirements(
       resource: resourceUrl,
       description,
       mimeType: 'application/json',
+      outputSchema: {
+        input: { type: 'http', method, discoverable: true, ...inputSchema },
+        output: outputSchema,
+      },
       payTo: getAddress(getPayTo()),
       maxTimeoutSeconds: 300,
       asset: getAddress(asset.address),
@@ -68,11 +108,12 @@ export type VerifiedPayment = {
 export async function verifyPayment(
   request: NextRequest,
   price: Price,
-  description: string
+  resource: PaidResource
 ): Promise<{ ok: true; payment: VerifiedPayment } | { ok: false; response: NextResponse }> {
-  const { verify } = useFacilitator({ url: getFacilitatorUrl() })
+  const { verify } = useFacilitator(getFacilitator())
   const resourceUrl = request.nextUrl.toString()
-  const paymentRequirements = await buildPaymentRequirements(price, resourceUrl, description)
+  const method = request.method.toUpperCase() as HTTPRequestStructure['method']
+  const paymentRequirements = await buildPaymentRequirements(price, resourceUrl, method, resource)
   const fail = (error: string) => ({ ok: false as const, response: paymentRequired(paymentRequirements, error) })
 
   const paymentHeader = request.headers.get('X-PAYMENT')
@@ -103,7 +144,7 @@ export async function verifyPayment(
  * Returns a 402 response on failure, or null once the payment has settled.
  */
 export async function settlePayment(payment: VerifiedPayment): Promise<NextResponse | null> {
-  const { settle } = useFacilitator({ url: getFacilitatorUrl() })
+  const { settle } = useFacilitator(getFacilitator())
   const settlement = await settle(payment.payload, payment.requirements)
   if (!settlement.success) {
     return paymentRequired(payment.allRequirements, settlement.errorReason ?? 'Failed to settle payment')
@@ -113,7 +154,7 @@ export async function settlePayment(payment: VerifiedPayment): Promise<NextRespo
 
 /**
  * Guards an x402-priced route. Call at the top of the handler with the
- * USDC price (e.g. '$0.05') and a short description of the resource.
+ * USDC price (e.g. '$0.05') and the resource's Bazaar listing.
  *
  * Returns a 402 NextResponse when payment is missing, invalid, or fails to
  * settle against the configured facilitator. Returns null when the payment
@@ -125,9 +166,9 @@ export async function settlePayment(payment: VerifiedPayment): Promise<NextRespo
 export async function requirePayment(
   request: NextRequest,
   price: Price,
-  description: string
+  resource: PaidResource
 ): Promise<NextResponse | null> {
-  const verified = await verifyPayment(request, price, description)
+  const verified = await verifyPayment(request, price, resource)
   if (!verified.ok) return verified.response
   return settlePayment(verified.payment)
 }
