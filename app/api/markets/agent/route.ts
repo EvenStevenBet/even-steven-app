@@ -3,7 +3,7 @@ import { serverPublicClient } from '@/lib/server-client'
 import { marketAbi, factoryAbi } from '@/lib/contracts'
 import { FACTORY_ADDRESS } from '@/lib/chain'
 import { formatZDisplay } from '@/lib/format'
-import { requirePayment, type PaidResource } from '@/lib/x402-server'
+import { withPayment, type PaidResource } from '@/lib/x402-server'
 import { quoteMarketEV } from '@/lib/payout'
 
 export const dynamic = 'force-dynamic'
@@ -87,10 +87,12 @@ const RESOURCE: PaidResource = {
   },
 }
 
+// Settled only when handle() answers 2xx: a 4xx costs the caller nothing.
 export async function GET(request: NextRequest) {
-  const paymentError = await requirePayment(request, '$0.05', RESOURCE)
-  if (paymentError) return paymentError
+  return withPayment(request, '$0.05', RESOURCE, () => handle(request))
+}
 
+async function handle(request: NextRequest) {
   const openMarkets = await serverPublicClient.readContract({
     address: FACTORY_ADDRESS,
     abi: factoryAbi,

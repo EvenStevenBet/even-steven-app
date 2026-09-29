@@ -3,7 +3,7 @@ import { isAddress } from 'viem'
 import { serverPublicClient } from '@/lib/server-client'
 import { marketAbi } from '@/lib/contracts'
 import { formatZDisplay } from '@/lib/format'
-import { requirePayment, type PaidResource } from '@/lib/x402-server'
+import { withPayment, type PaidResource } from '@/lib/x402-server'
 
 export const dynamic = 'force-dynamic'
 
@@ -41,10 +41,12 @@ const RESOURCE: PaidResource = {
   },
 }
 
+// Settled only when handle() answers 2xx: a 4xx costs the caller nothing.
 export async function GET(request: NextRequest) {
-  const paymentError = await requirePayment(request, '$0.01', RESOURCE)
-  if (paymentError) return paymentError
+  return withPayment(request, '$0.01', RESOURCE, () => handle(request))
+}
 
+async function handle(request: NextRequest) {
   const { searchParams } = new URL(request.url)
   const marketAddressParam = searchParams.get('marketAddress')
   const bettorParam = searchParams.get('bettor')
