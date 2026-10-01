@@ -42,6 +42,7 @@ export const marketAbi = parseAbi([
   'function placeBetForWithSignature(address bettor, bool greaterThan, uint256 stake, AuthorizationBytes auth)',
   'function claimPayoutFor(address bettor, uint256[] betIds)',
   'function FEE_PERCENT() view returns (uint256)',
+  'function MAX_BETS() view returns (uint256)',
   'event BetClaimed(address indexed bettor, uint256 indexed betId, uint256 payout)',
   'event SettlementDetails(uint256 distributable, uint256 winningStakes)',
   // Every custom error declared in SportsbookMarket-v1_11.sol, so viem can
@@ -107,4 +108,6 @@ export const factoryAbi = parseAbi([
   'function marketByGameId(string) view returns (address)',
   // v1.6: non-empty only for markets this factory created.
   'function gameIdByMarket(address) view returns (string)',
+  // Every market ever created — SportsbookFactory-v1_6.sol. Used by the auto-claim cron.
+  'function getAllMarkets() view returns (address[])',
 ])
