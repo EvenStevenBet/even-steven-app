@@ -6,7 +6,8 @@ import { marketAbi, factoryAbi } from '@/lib/contracts'
 import { relayAccount, getRelayEthBalance, RELAY_MIN_ETH } from '@/lib/relay'
 import { runClaim, V1_6_FACTORY } from '@/lib/claim'
 
-// Auto-claim cron. Hourly via vercel.json; Vercel Cron sends GET with
+// Auto-claim cron. Daily via vercel.json (the Hobby plan allows only daily
+// crons; hourly needs Pro). Vercel Cron sends GET with
 // `Authorization: Bearer $CRON_SECRET`, and POST is accepted for manual runs.
 // Off unless AUTO_CLAIM_ENABLED=true. Claims run server-side through the same
 // runClaim() as POST /api/claim, so the relay key never leaves Vercel.
