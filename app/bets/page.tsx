@@ -15,6 +15,7 @@ import type { Side } from '@/lib/line'
 import { useWalletBets } from '@/lib/useWalletBets'
 import type { WalletBet } from '@/lib/bets'
 import { ShareButton } from '@/components/ShareButton'
+import { attributionSuffix } from '@/lib/attribution'
 
 function describeError(err: unknown): string {
   if (err instanceof BaseError) return err.shortMessage
@@ -96,6 +97,7 @@ export default function BetsPage() {
         functionName: 'claimPayout',
         args: [bet.betId],
         account: address,
+        dataSuffix: attributionSuffix(),
       })
       const hash = await writeContractAsync({
         address: marketAddress,
@@ -103,6 +105,7 @@ export default function BetsPage() {
         functionName: 'claimPayout',
         args: [bet.betId],
         gas: (gas * BigInt(120)) / BigInt(100),
+        dataSuffix: attributionSuffix(),
       })
       setClaimStates(prev => ({ ...prev, [key]: { step: 'confirming', txHash: hash } }))
       const receipt = await publicClient.waitForTransactionReceipt({ hash })
@@ -126,12 +129,14 @@ export default function BetsPage() {
         abi: marketAbi,
         functionName: 'claimAllPayouts',
         account: address,
+        dataSuffix: attributionSuffix(),
       })
       const hash = await writeContractAsync({
         address: addr,
         abi: marketAbi,
         functionName: 'claimAllPayouts',
         gas: (gas * BigInt(120)) / BigInt(100),
+        dataSuffix: attributionSuffix(),
       })
       setClaimStates(prev => ({ ...prev, [key]: { step: 'confirming', txHash: hash } }))
       const receipt = await publicClient.waitForTransactionReceipt({ hash })

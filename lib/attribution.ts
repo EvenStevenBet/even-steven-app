@@ -1,10 +1,16 @@
 import { isAddress, type Hex } from 'viem'
 
-// ERC-8021 schema 0 suffix: codes ∥ codesLength (1 byte) ∥ schemaId 0x00 ∥ 16-byte marker.
-// Solidity ignores trailing calldata, so appending it to placeBet / placeBetFor changes
-// nothing on-chain while putting the ref inside data the bettor signed. Byte layout
-// matches ox/erc8021 Attribution.toDataSuffix.
+// ERC-8021 schema 0 suffix: codes ∥ codesLength (1 byte) ∥ schemaId 0x00 ∥ 16-byte marker,
+// codes comma-delimited ASCII. Solidity ignores trailing calldata, so appending it changes
+// nothing on-chain. Byte layout matches ox/erc8021 Attribution.toDataSuffix (ox 1.8.5).
 const MARKER = '80218021802180218021802180218021'
+
+/**
+ * Even Steven's own Base builder code (dashboard.base.org → Project Settings). It goes on
+ * every Even Steven transaction for Base's attribution and rewards, first in the code list,
+ * and is never a referrer: refsFromCalldata drops it, so it earns no points or fee share.
+ */
+export const ES_BUILDER_CODE = 'bc_ncytgilx'
 
 const BUILDER_CODE = /^[a-z0-9-]{3,32}$/
 
@@ -17,14 +23,16 @@ export function normalizeRef(raw: unknown): string | null {
   return null
 }
 
-export function refDataSuffix(ref: string): Hex {
-  const codes = Array.from(new TextEncoder().encode(ref), (b) => b.toString(16).padStart(2, '0')).join('')
+/** The suffix for every Even Steven transaction: our builder code, then the third-party ref if any. */
+export function attributionSuffix(ref?: string | null): Hex {
+  const list = ref && ref !== ES_BUILDER_CODE ? [ES_BUILDER_CODE, ref] : [ES_BUILDER_CODE]
+  const codes = Array.from(new TextEncoder().encode(list.join(',')), (b) => b.toString(16).padStart(2, '0')).join('')
   const length = (codes.length / 2).toString(16).padStart(2, '0')
   return `0x${codes}${length}00${MARKER}`
 }
 
 /**
- * Every schema-0 code found anywhere in the calldata. Scans rather than reading only the
+ * Every third-party schema-0 code found anywhere in the calldata (our own builder code excluded). Scans rather than reading only the
  * tail: in a Smart Wallet transaction the placeBet calldata (and its suffix) sits inside
  * EntryPoint.handleOps, followed by ABI padding.
  */
@@ -40,5 +48,5 @@ export function refsFromCalldata(input: Hex): string[] {
     if (!bytes.every((b) => b >= 0x20 && b < 0x7f)) continue
     found.push(...String.fromCharCode(...bytes).split(','))
   }
-  return found
+  return found.filter((code) => code.toLowerCase() !== ES_BUILDER_CODE)
 }

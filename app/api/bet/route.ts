@@ -24,7 +24,7 @@ import {
   acquireLock, clientIp, consumeRateLimit, recordStrike, releaseLock, strikeCounts,
   LOCK_TTL_SECONDS, MAX_STRIKES, RATE_LIMIT_PER_MINUTE,
 } from '@/lib/abuse'
-import { refDataSuffix } from '@/lib/attribution'
+import { attributionSuffix } from '@/lib/attribution'
 import { buildRecord, recordAttribution } from '@/lib/attribution-store'
 import { resolveRefForBettor } from '@/lib/refs'
 
@@ -212,7 +212,8 @@ async function handle(request: NextRequest) {
   }
 
   // 5. Route by signature shape and simulate from the relay with the exact args
-  const dataSuffix = ref ? refDataSuffix(ref.id.toLowerCase()) : undefined
+  // Our Base builder code always; the bettor's ref alongside it when one resolved.
+  const dataSuffix = attributionSuffix(ref?.id.toLowerCase())
   const common = { address: marketAddress, abi: marketAbi, account: relayAccount, dataSuffix } as const
   let submit: () => Promise<Hash>
   try {

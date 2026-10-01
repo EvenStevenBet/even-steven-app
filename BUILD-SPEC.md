@@ -132,6 +132,7 @@ Revised Sept 2026. The original "no referral tracking, no points, no database" r
 **Refs and builder codes**
 - A ref is an approved builder code (lowercase `[a-z0-9-]{3,32}`, `approved: true` in `data/builders.json`), which earns 30% of the fee plus referral points, or any wallet address, which earns referral points only. A ref that pays the bettor is dropped (no self-referral).
 - Refs travel on-chain as an ERC-8021 schema-0 calldata suffix appended to `placeBet` (web: both the Smart Wallet batch and EOA paths) or `placeBetFor` (relay, from `ref` in the `POST /api/bet` body). The market ignores trailing calldata.
+- Every Even Steven transaction (web bets and approvals, web claims, relay bets, relayed `claimPayoutFor`) carries Even Steven's own Base builder code `bc_ncytgilx` first in that suffix, for Base's attribution and rewards; a third-party ref goes alongside it, never replacing it. Smart Wallet batches also pass it as the EIP-5792 `dataSuffix` capability (optional). `bc_ncytgilx` is never a referrer: it earns no points and no fee share.
 - Attribution records: one per txHash in Upstash (`attr:tx:<hash>`, SET NX, no TTL, indexed in `attr:index`). The relay writes its record after its success checks pass. Web bets POST `{ txHash }` to `/api/attribution`, which requires exactly one `BetPlaced` from a Factory v1.6 market and reads the ref from the transaction's own calldata, never from the request body.
 - The weekly builder report (30% of fee, `BUILDER_SHARE_BPS`) runs in the private `even-steven-ops` repo. Nothing is transferred automatically.
 
