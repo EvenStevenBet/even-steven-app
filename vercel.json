@@ -1,5 +1,0 @@
-{
-  "crons": [
-    { "path": "/api/claim/auto", "schedule": "0 * * * *" }
-  ]
-}
