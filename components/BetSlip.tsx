@@ -20,6 +20,7 @@ import type { Side } from '@/lib/line'
 import { isFirstMoverMarket, stakedPool } from '@/lib/pool'
 import { quoteMarketEV } from '@/lib/payout'
 import { attributionSuffix } from '@/lib/attribution'
+import { ApprovalLagError, placeBetEoa } from '@/lib/eoa-bet'
 import { getStoredRef } from '@/lib/share-ref'
 import { Countdown } from '@/components/Countdown'
 import { FirstMoverBadge } from '@/components/FirstMoverBadge'
@@ -47,16 +48,6 @@ const MAX_UINT256 = (BigInt(1) << BigInt(256)) - BigInt(1)
 const BRIDGE_URL = 'https://bridge.base.org/deposit'
 const SWAP_URL = `https://app.uniswap.org/swap?chain=base&outputCurrency=${USDC_ADDRESS}`
 
-// Wallets' built-in gas estimation has been observed returning wildly
-// inflated values (~140M gas, near a full block) for these calls, which RPC
-// providers reject outright before broadcast. Estimate for real via
-// publicClient.estimateContractGas and pass an explicit, buffered value
-// instead of trusting the wallet's own default estimation path.
-const GAS_BUFFER_NUMERATOR = BigInt(120)
-const GAS_BUFFER_DENOMINATOR = BigInt(100)
-function withGasBuffer(gas: bigint): bigint {
-  return (gas * GAS_BUFFER_NUMERATOR) / GAS_BUFFER_DENOMINATOR
-}
 
 interface Props {
   marketAddress: `0x${string}`
@@ -74,6 +65,7 @@ type Step =
   | 'confirming_bet'
   | 'awaiting_batch_signature'
   | 'confirming_batch'
+  | 'approval_lagging'
   | 'success'
   | 'error'
 
@@ -85,6 +77,8 @@ const STEP_LABEL: Record<Step, string> = {
   confirming_bet: 'Bet submitted — waiting for confirmation…',
   awaiting_batch_signature: 'Confirm the bet in your wallet…',
   confirming_batch: 'Confirming your bet…',
+  // Not busy: the Place bet button comes back, and the retry skips the (already done) approval.
+  approval_lagging: 'Confirming approval… it’s on-chain, the network is catching up. Tap Place bet again in a few seconds.',
   success: 'Bet placed.',
   error: 'Something went wrong.',
 }
@@ -458,63 +452,19 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
     if (!publicClient) return
 
     try {
-      setStep('awaiting_approval_signature')
-
-      // Skip a redundant approval if this address already approved enough
-      // for this market — e.g. a retry after placeBet was rejected post-approval.
-      const currentAllowance = await publicClient.readContract({
-        address: USDC_ADDRESS,
-        abi: erc20Abi,
-        functionName: 'allowance',
-        args: [address, marketAddress],
-      })
-
-      if (currentAllowance < totalCost) {
-        const approveGasEstimate = await publicClient.estimateContractGas({
-          address: USDC_ADDRESS,
-          abi: erc20Abi,
-          functionName: 'approve',
-          args: [marketAddress, MAX_UINT256],
-          account: address,
-          dataSuffix: attributionSuffix(),
-        })
-        const approveHash = await writeContractAsync({
-          address: USDC_ADDRESS,
-          abi: erc20Abi,
-          functionName: 'approve',
-          args: [marketAddress, MAX_UINT256],
-          gas: withGasBuffer(approveGasEstimate),
-          dataSuffix: attributionSuffix(),
-        })
-        setStep('confirming_approval')
-        const approveReceipt = await publicClient.waitForTransactionReceipt({ hash: approveHash })
-        if (approveReceipt.status !== 'success') {
-          throw new Error('USDC approval transaction reverted on-chain.')
-        }
-      }
-
-      setStep('awaiting_bet_signature')
-      const betGasEstimate = await publicClient.estimateContractGas({
-        address: marketAddress,
-        abi: marketAbi,
-        functionName: 'placeBet',
-        args: [side === 'home', stakeBigInt],
+      const { hash: betHash, receipt: betReceipt } = await placeBetEoa({
+        publicClient,
+        writeContract: (args) => writeContractAsync(args as Parameters<typeof writeContractAsync>[0]),
         account: address,
-        dataSuffix,
+        usdc: USDC_ADDRESS,
+        market: marketAddress,
+        greaterThan: side === 'home',
+        stake: stakeBigInt,
+        totalCost,
+        betSuffix: dataSuffix,
+        approveSuffix: attributionSuffix(),
+        onStep: setStep,
       })
-      const betHash = await writeContractAsync({
-        address: marketAddress,
-        abi: marketAbi,
-        functionName: 'placeBet',
-        args: [side === 'home', stakeBigInt],
-        gas: withGasBuffer(betGasEstimate),
-        dataSuffix,
-      })
-      setStep('confirming_bet')
-      const betReceipt = await publicClient.waitForTransactionReceipt({ hash: betHash })
-      if (betReceipt.status !== 'success') {
-        throw new Error('placeBet transaction reverted on-chain.')
-      }
 
       // Decode lockedZ from the BetPlaced event in the receipt
       for (const log of betReceipt.logs) {
@@ -540,6 +490,10 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
       refetchBalance()
       refetchMarketState()
     } catch (err) {
+      if (err instanceof ApprovalLagError) {
+        setStep('approval_lagging')
+        return
+      }
       console.error('placeBet failed:', err)
       setStep('error')
       setErrorMessage(describeError(err))
