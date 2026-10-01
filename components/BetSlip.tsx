@@ -19,7 +19,7 @@ import { favoriteHeadline, formatSpread, lineSentence, outcomeText } from '@/lib
 import type { Side } from '@/lib/line'
 import { isFirstMoverMarket, stakedPool } from '@/lib/pool'
 import { quoteMarketEV } from '@/lib/payout'
-import { refDataSuffix } from '@/lib/attribution'
+import { attributionSuffix } from '@/lib/attribution'
 import { getStoredRef } from '@/lib/share-ref'
 import { Countdown } from '@/components/Countdown'
 import { FirstMoverBadge } from '@/components/FirstMoverBadge'
@@ -388,10 +388,10 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
     setErrorMessage(null)
     setSuccessTxHash(null)
     setSuccessBetId(null)
-    // Ref from a share link, carried as an ERC-8021 calldata suffix the market ignores.
-    // A bettor's own address is never their ref.
+    // ERC-8021 calldata suffix the market ignores: Even Steven's Base builder code, plus the
+    // share-link ref when there is one. A bettor's own address is never their ref.
     const ref = getStoredRef()
-    const dataSuffix = ref && ref !== address.toLowerCase() ? refDataSuffix(ref) : undefined
+    const dataSuffix = attributionSuffix(ref && ref !== address.toLowerCase() ? ref : null)
     // Remembered because `side` is cleared on reset, and the confirmation has
     // to describe the bet that was actually placed.
     setSideAtPlacement(side)
@@ -410,7 +410,10 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
           functionName: 'placeBet',
           args: [side === 'home', stakeBigInt],
         })
-        const betCalldata = dataSuffix ? concat([placeBetCalldata, dataSuffix]) : placeBetCalldata
+        // Inside the placeBet call (our attribution reads it there), and below as the
+        // dataSuffix capability so the wallet also appends it to the outer call data,
+        // where Base reads builder codes for smart accounts.
+        const betCalldata = concat([placeBetCalldata, dataSuffix])
         const paymasterUrl = process.env.NEXT_PUBLIC_PAYMASTER_URL
 
         betCountBefore.current = null
@@ -428,16 +431,17 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
         // Only attach the paymaster when the wallet says it supports one, and mark it
         // optional: a wallet must reject the whole batch over a required capability it
         // lacks (EIP-5792) — the likely cause of the Base App bet failures.
-        const sponsor = paymasterUrl && paymasterSupported
-          ? { capabilities: { paymasterService: { url: paymasterUrl, optional: true } } }
-          : {}
+        const capabilities = {
+          dataSuffix: { value: dataSuffix, optional: true },
+          ...(paymasterUrl && paymasterSupported ? { paymasterService: { url: paymasterUrl, optional: true } } : {}),
+        }
 
         const { id } = await sendCallsAsync({
           calls: [
             { to: USDC_ADDRESS, data: approveCalldata },
             { to: marketAddress, data: betCalldata },
           ],
-          ...sponsor,
+          capabilities,
         })
 
         callsSentAt.current = Date.now()
@@ -472,6 +476,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
           functionName: 'approve',
           args: [marketAddress, MAX_UINT256],
           account: address,
+          dataSuffix: attributionSuffix(),
         })
         const approveHash = await writeContractAsync({
           address: USDC_ADDRESS,
@@ -479,6 +484,7 @@ export function BetSlip({ marketAddress, homeTeam, awayTeam, closesAt }: Props) 
           functionName: 'approve',
           args: [marketAddress, MAX_UINT256],
           gas: withGasBuffer(approveGasEstimate),
+          dataSuffix: attributionSuffix(),
         })
         setStep('confirming_approval')
         const approveReceipt = await publicClient.waitForTransactionReceipt({ hash: approveHash })

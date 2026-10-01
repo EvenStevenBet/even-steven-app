@@ -9,6 +9,7 @@ import { serverPublicClient } from '@/lib/server-client'
 import { marketAbi, factoryAbi, erc20Abi } from '@/lib/contracts'
 import { relayAccount, relayWalletClient, getRelayEthBalance, RELAY_MIN_ETH } from '@/lib/relay'
 import { acquireClaimLock, releaseClaimLock, CLAIM_LOCK_TTL_SECONDS } from '@/lib/claim-abuse'
+import { attributionSuffix } from '@/lib/attribution'
 
 // Server-side only. Relayed, gasless claiming via SportsbookMarket v1.11
 // claimPayoutFor(bettor, betIds): permissionless, pays only bet.bettor, and
@@ -129,6 +130,7 @@ export async function runClaim(market: Address, bettor: Address, log = '[claim]'
   try {
     const { request: tx } = await serverPublicClient.simulateContract({
       address: market, abi: marketAbi, functionName: 'claimPayoutFor', args: [bettor, betIds], account: relayAccount,
+      dataSuffix: attributionSuffix(), // Even Steven's Base builder code; the market ignores it
     })
     submit = () => relayWalletClient!.writeContract(tx)
   } catch (err) {
