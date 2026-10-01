@@ -12,12 +12,16 @@ import { fileURLToPath } from 'node:url'
 import { generatePrivateKey } from 'viem/accounts'
 import { createSigner } from 'x402/types'
 import { createPaymentHeader } from 'x402/client'
+import { startUpstashMock } from './upstash-mock.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const APP_ROOT = path.resolve(HERE, '../..')
 const APP_PORT = Number(process.env.SETTLE_E2E_APP_PORT ?? 13998)
 const FAC_PORT = Number(process.env.SETTLE_E2E_FAC_PORT ?? 18080)
 const APP = `http://127.0.0.1:${APP_PORT}`
+const REDIS_PORT = Number(process.env.SETTLE_E2E_REDIS_PORT ?? 18081)
+const LIMIT = 5
+let redis
 
 const CLOSED_GAME = 'NFL-2026-09-28-HOME-Bears-AWAY-Eagles'
 const SETTLED_MARKET = '0xF0F11bbce394Cf780a20f8A7F63490F50a175A26' // Dolphins/Chiefs
@@ -56,9 +60,12 @@ function check(name, cond, detail = '') {
   if (!cond) failures++
 }
 let header
-async function paid(pathname) {
+// Every call clears the rate-limit store unless { keep: true }, so only the
+// rate-limit section below is ever limited.
+async function paid(pathname, { ip = '203.0.113.1', keep = false, payment = header } = {}) {
+  if (!keep) redis?.flush()
   const before = { ...calls }
-  const res = await fetch(`${APP}${pathname}`, { headers: header ? { 'X-PAYMENT': header } : {} })
+  const res = await fetch(`${APP}${pathname}`, { headers: { 'x-real-ip': ip, ...(payment ? { 'X-PAYMENT': payment } : {}) } })
   const text = await res.text()
   let json = null
   try { json = JSON.parse(text) } catch {}
@@ -66,14 +73,19 @@ async function paid(pathname) {
     status: res.status, json, text,
     verified: calls.verify - before.verify, settled: calls.settle - before.settle,
     paymentResponse: res.headers.get('x-payment-response'),
+    retryAfter: res.headers.get('retry-after'),
   }
 }
 
 async function main() {
   await new Promise((r) => fac.listen(FAC_PORT, r))
+  redis = await startUpstashMock(REDIS_PORT)
   const app = spawn('npx', ['next', 'dev', '-p', String(APP_PORT)], {
     cwd: APP_ROOT,
-    env: { ...process.env, X402_FACILITATOR_URL: `http://127.0.0.1:${FAC_PORT}`, CDP_API_KEY_ID: '', CDP_API_KEY_SECRET: '', NEXT_PUBLIC_CHAIN: 'base' },
+    env: {
+      ...process.env, X402_FACILITATOR_URL: `http://127.0.0.1:${FAC_PORT}`, CDP_API_KEY_ID: '', CDP_API_KEY_SECRET: '', NEXT_PUBLIC_CHAIN: 'base',
+      UPSTASH_REDIS_REST_URL: `http://127.0.0.1:${REDIS_PORT}`, UPSTASH_REDIS_REST_TOKEN: 'mock', X402_RATE_LIMIT_PER_MINUTE: String(LIMIT),
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   const logs = []
@@ -121,9 +133,30 @@ async function main() {
     mode = 'verify-invalid'
     r = await paid(`/api/bet/status?marketAddress=${SETTLED_MARKET}&bettor=${BETTOR}`)
     check('T10 verify invalid -> 402, not settled', r.status === 402 && r.settled === 0 && r.json?.error === 'invalid_exact_evm_payload_signature', `${r.status} ${r.json?.error}`)
+    mode = 'ok'
+
+    console.log(`\nrate limit (${LIMIT}/min): counted before the facilitator or RPC`)
+    redis.flush()
+    const ipCodes = []
+    for (let i = 0; i <= LIMIT; i++) ipCodes.push((await paid('/api/bet/status', { ip: '198.51.100.7', keep: true, payment: null })).status)
+    check(`R1 per IP: ${LIMIT} answered, then 429`, ipCodes.slice(0, LIMIT).every((c) => c === 402) && ipCodes[LIMIT] === 429, ipCodes.join(','))
+
+    redis.flush()
+    const payerRuns = []
+    for (let i = 0; i <= LIMIT; i++) payerRuns.push(await paid('/api/bet/quote', { ip: `198.51.100.${10 + i}`, keep: true }))
+    const last = payerRuns[LIMIT]
+    check(`R2 same payer from ${LIMIT + 1} IPs: ${LIMIT} answered 400, then 429`, payerRuns.slice(0, LIMIT).every((x) => x.status === 400) && last.status === 429, payerRuns.map((x) => x.status).join(','))
+    check('R2 limited request never reached the facilitator', last.verified === 0 && last.settled === 0, `v${last.verified} s${last.settled}`)
+    check('R2 429 names the payer scope and sets Retry-After', last.json?.scope === 'payer' && Number(last.retryAfter) > 0, `${last.json?.scope} ${last.retryAfter}`)
+
+    redis.server.close()
+    await new Promise((r) => setTimeout(r, 200))
+    r = await paid(`/api/bet/status?marketAddress=${SETTLED_MARKET}&bettor=${BETTOR}`, { keep: true })
+    check('R3 rate-limit store down: fails open, request still served and settled', r.status === 200 && r.settled === 1, `${r.status} s${r.settled}`)
   } finally {
     app.kill('SIGTERM')
     fac.close()
+    redis?.server.close()
     if (failures) console.log('\n--- next dev log (tail) ---\n' + logs.join('').split('\n').slice(-40).join('\n'))
   }
   console.log(`\n${failures ? `${failures} FAILED` : 'ALL PASSED'}`)
