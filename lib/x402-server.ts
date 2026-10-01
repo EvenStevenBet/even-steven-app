@@ -4,7 +4,9 @@ import { exact } from 'x402/schemes'
 import { findMatchingPaymentRequirements, processPriceToAtomicAmount } from 'x402/shared'
 import { useFacilitator } from 'x402/verify'
 import { createFacilitatorConfig } from '@coinbase/x402'
-import type { FacilitatorConfig, HTTPRequestStructure, Network, PaymentPayload, PaymentRequirements, Price } from 'x402/types'
+import { clientIp, consumeIpLimit, consumePayerLimit } from '@/lib/x402-abuse'
+import { settleResponseHeader } from 'x402/types'
+import type { FacilitatorConfig, HTTPRequestStructure, Network, PaymentPayload, PaymentRequirements, Price, SettleResponse } from 'x402/types'
 
 // Inline x402 enforcement for App Router route handlers. Route handlers run
 // in the Node.js runtime (not Edge) by default, so — unlike middleware.ts,
@@ -141,34 +143,70 @@ export async function verifyPayment(
 
 /**
  * Phase 2 of two-phase x402. Settles a payment returned by verifyPayment().
- * Returns a 402 response on failure, or null once the payment has settled.
+ * On success returns the facilitator's settlement (tx hash, payer); on
+ * failure a 402 response. A facilitator error counts as a failed settlement.
  */
-export async function settlePayment(payment: VerifiedPayment): Promise<NextResponse | null> {
+export async function settlePayment(
+  payment: VerifiedPayment
+): Promise<{ ok: true; settlement: SettleResponse } | { ok: false; response: NextResponse }> {
   const { settle } = useFacilitator(getFacilitator())
-  const settlement = await settle(payment.payload, payment.requirements)
-  if (!settlement.success) {
-    return paymentRequired(payment.allRequirements, settlement.errorReason ?? 'Failed to settle payment')
+  let settlement: SettleResponse
+  try {
+    settlement = await settle(payment.payload, payment.requirements)
+  } catch (err) {
+    console.error('[x402] settle failed', err)
+    return { ok: false, response: paymentRequired(payment.allRequirements, 'Failed to settle payment') }
   }
-  return null
+  if (!settlement.success) {
+    return { ok: false, response: paymentRequired(payment.allRequirements, settlement.errorReason ?? 'Failed to settle payment') }
+  }
+  return { ok: true, settlement }
+}
+
+function rateLimited(scope: 'ip' | 'payer', retryAfterSeconds: number) {
+  return NextResponse.json(
+    { error: 'RateLimited', message: `too many requests from this ${scope} this minute`, scope, retryAfterSeconds },
+    { status: 429, headers: { 'Retry-After': String(retryAfterSeconds) } }
+  )
 }
 
 /**
- * Guards an x402-priced route. Call at the top of the handler with the
- * USDC price (e.g. '$0.05') and the resource's Bazaar listing.
+ * Runs an x402-priced route: verify the payment, run `handler`, and settle
+ * only if the handler answered 2xx. A 4xx/5xx (bad params, unknown gameId,
+ * market not open) or a thrown error is returned as-is and costs the payer
+ * nothing — the verified authorization is simply never submitted.
  *
- * Returns a 402 NextResponse when payment is missing, invalid, or fails to
- * settle against the configured facilitator. Returns null when the payment
- * has been verified AND settled — the caller should proceed and return its
- * normal response. Because settlement happens here, before the handler's
- * own logic runs, a request that later 400/404/409s inside the handler
- * (e.g. an unknown gameId) still consumes the payment.
+ * The data is released only once the payment has settled: if settlement
+ * fails, the caller gets a 402 instead of the handler's body. On success the
+ * response carries the standard X-PAYMENT-RESPONSE header (settlement tx).
  */
-export async function requirePayment(
+export async function withPayment(
   request: NextRequest,
   price: Price,
-  resource: PaidResource
-): Promise<NextResponse | null> {
+  resource: PaidResource,
+  handler: () => Promise<NextResponse>
+): Promise<NextResponse> {
+  // Per IP before any facilitator call or RPC read: unsettled 4xx answers are
+  // free, so this caps what junk or replayed payments can cost us.
+  const ipLimit = await consumeIpLimit(clientIp(request))
+  if (ipLimit.limited) return rateLimited('ip', ipLimit.retryAfterSeconds)
+
   const verified = await verifyPayment(request, price, resource)
   if (!verified.ok) return verified.response
-  return settlePayment(verified.payment)
+
+  // Per payer only once the facilitator has verified the signature, so the
+  // address is the caller's own. Checked before the handler's RPC reads.
+  const from = (verified.payment.payload.payload as { authorization?: { from?: unknown } }).authorization?.from
+  if (typeof from === 'string') {
+    const payerLimit = await consumePayerLimit(from)
+    if (payerLimit.limited) return rateLimited('payer', payerLimit.retryAfterSeconds)
+  }
+
+  const response = await handler()
+  if (response.status < 200 || response.status >= 300) return response
+
+  const settled = await settlePayment(verified.payment)
+  if (!settled.ok) return settled.response
+  response.headers.set('X-PAYMENT-RESPONSE', settleResponseHeader(settled.settlement))
+  return response
 }
