@@ -5,6 +5,9 @@ import { formatUsdc } from '@/lib/format'
 
 // /api/og/bet?market=<addr>&betId=<id>[&aspect=3:2]
 // 1200×630 for X / Open Graph; 3:2 (1200×800) for the Farcaster fc:miniapp embed.
+// X overlays its title label on the bottom-left of summary_large_image cards, so the bottom
+// SAFE_BOTTOM px stay empty except for the right-anchored footer.
+const SAFE_BOTTOM = 120
 
 const GOLD = '#f5c842'
 const BG = '#0a0a0a'
@@ -34,7 +37,7 @@ export async function GET(request: NextRequest) {
 
   return new ImageResponse(
     (
-      <div style={{ background: BG, width: '100%', height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', padding: tall ? '64px 72px' : '48px 72px', color: '#fff', fontFamily: 'sans-serif', position: 'relative' }}>
+      <div style={{ background: BG, width: '100%', height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', padding: `${tall ? 64 : 44}px 72px ${SAFE_BOTTOM}px`, color: '#fff', fontFamily: 'sans-serif', position: 'relative' }}>
         <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 6, background: GOLD }} />
 
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -54,6 +57,11 @@ export async function GET(request: NextRequest) {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ display: 'flex', fontSize: 22, color: 'rgba(255,255,255,0.6)' }}>
+            {card.multipleX100 === null
+              ? `No stakes on ${card.team} yet`
+              : `If ${card.team} covers, at current pools: ${formatMultiple(card.multipleX100)}`}
+          </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 22, color: 'rgba(255,255,255,0.7)' }}>
             <div style={{ display: 'flex' }}>{`${card.homeTeam} $${formatUsdc(card.homeStaked)}`}</div>
             <div style={{ display: 'flex', color: 'rgba(255,255,255,0.45)' }}>POOL BALANCE</div>
@@ -63,14 +71,10 @@ export async function GET(request: NextRequest) {
             <div style={{ display: 'flex', width: `${homePct}%`, height: '100%', background: card.side === 'home' ? GOLD : 'rgba(255,255,255,0.55)' }} />
             <div style={{ display: 'flex', flexGrow: 1, height: '100%', background: card.side === 'away' ? GOLD : 'rgba(255,255,255,0.3)' }} />
           </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginTop: 6 }}>
-            <div style={{ display: 'flex', fontSize: 22, color: 'rgba(255,255,255,0.6)' }}>
-              {card.multipleX100 === null
-                ? `No stakes on ${card.team} yet`
-                : `If ${card.team} covers, at current pools: ${formatMultiple(card.multipleX100)}`}
-            </div>
-            <div style={{ display: 'flex', fontSize: 20, color: 'rgba(255,255,255,0.4)' }}>At liquidity, $100 wins $100 · 2% fee</div>
-          </div>
+        </div>
+
+        <div style={{ position: 'absolute', right: 72, bottom: 44, display: 'flex', fontSize: 20, color: 'rgba(255,255,255,0.4)' }}>
+          At liquidity, $100 wins $100 · 2% fee
         </div>
       </div>
     ),
