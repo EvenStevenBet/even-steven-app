@@ -135,7 +135,7 @@ async function main() {
     check('T10 verify invalid -> 402, not settled', r.status === 402 && r.settled === 0 && r.json?.error === 'invalid_exact_evm_payload_signature', `${r.status} ${r.json?.error}`)
     mode = 'ok'
 
-    console.log(`\nrate limit (${LIMIT}/min): counted before the facilitator or RPC`)
+    console.log(`\nrate limit (${LIMIT}/min): per IP before verify, per payer after verify`)
     redis.flush()
     const ipCodes = []
     for (let i = 0; i <= LIMIT; i++) ipCodes.push((await paid('/api/bet/status', { ip: '198.51.100.7', keep: true, payment: null })).status)
@@ -146,8 +146,19 @@ async function main() {
     for (let i = 0; i <= LIMIT; i++) payerRuns.push(await paid('/api/bet/quote', { ip: `198.51.100.${10 + i}`, keep: true }))
     const last = payerRuns[LIMIT]
     check(`R2 same payer from ${LIMIT + 1} IPs: ${LIMIT} answered 400, then 429`, payerRuns.slice(0, LIMIT).every((x) => x.status === 400) && last.status === 429, payerRuns.map((x) => x.status).join(','))
-    check('R2 limited request never reached the facilitator', last.verified === 0 && last.settled === 0, `v${last.verified} s${last.settled}`)
+    check('R2 payer limit applies after verify: verified, never settled', last.verified === 1 && last.settled === 0, `v${last.verified} s${last.settled}`)
     check('R2 429 names the payer scope and sets Retry-After', last.json?.scope === 'payer' && Number(last.retryAfter) > 0, `${last.json?.scope} ${last.retryAfter}`)
+
+    // A forged X-PAYMENT naming this payer fails verification and must not
+    // spend their quota: LIMIT+1 forgeries, then their real request is served.
+    redis.flush()
+    mode = 'verify-invalid'
+    const forged = []
+    for (let i = 0; i <= LIMIT; i++) forged.push((await paid('/api/bet/quote', { ip: `192.0.2.${10 + i}`, keep: true })).status)
+    mode = 'ok'
+    r = await paid(`/api/bet/status?marketAddress=${SETTLED_MARKET}&bettor=${BETTOR}`, { ip: '192.0.2.99', keep: true })
+    check(`R4 ${LIMIT + 1} forged headers for one payer: all 402`, forged.every((c) => c === 402), forged.join(','))
+    check('R4 then the real payer is served and settled (quota untouched)', r.status === 200 && r.settled === 1, `${r.status} s${r.settled}`)
 
     redis.server.close()
     await new Promise((r) => setTimeout(r, 200))

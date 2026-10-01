@@ -4,10 +4,11 @@ import { Redis } from '@upstash/redis'
 // same Upstash Redis as lib/abuse.ts under x402:* keys. Since a 4xx answer is
 // never settled (lib/x402-server.ts withPayment), a replayed or junk X-PAYMENT
 // would otherwise cost us a facilitator /verify and the handler's RPC reads
-// for free. Counted before either runs.
+// for free.
 //
-// Two fixed one-minute windows: per IP, and per payer address decoded from
-// X-PAYMENT, so one signature replayed from many IPs is still capped.
+// Two fixed one-minute windows: per IP (before verification), and per payer
+// (after verification), so one valid signature replayed from many IPs is still
+// capped without letting a forged header spend another payer's quota.
 //
 // Fails OPEN: these routes only read and never move funds (the facilitator
 // verifies every payment), so a Redis outage should not take paid data down.
@@ -21,27 +22,35 @@ const redis = url && token ? new Redis({ url, token, retry: { retries: 1 } }) : 
 const configured = Number(process.env.X402_RATE_LIMIT_PER_MINUTE)
 export const X402_RATE_LIMIT_PER_MINUTE = Number.isInteger(configured) && configured > 0 ? configured : 30
 
-export type RateLimitResult = { limited: false } | { limited: true; scope: 'ip' | 'payer'; retryAfterSeconds: number }
+export type RateLimitResult = { limited: false } | { limited: true; retryAfterSeconds: number }
 
-export async function consumeX402RateLimit(ip: string, payer: string | null): Promise<RateLimitResult> {
+/** Fixed one-minute window on `key`. Fails open on any store error. */
+async function consume(key: string): Promise<RateLimitResult> {
   if (!redis) {
     console.error('[x402] rate limit store not configured — allowing request')
     return { limited: false }
   }
   const now = Math.floor(Date.now() / 1000)
-  const window = Math.floor(now / 60)
-  const ipKey = `x402:rl:ip:${ip}:${window}`
-  const payerKey = payer ? `x402:rl:payer:${payer.toLowerCase()}:${window}` : null
+  const windowKey = `${key}:${Math.floor(now / 60)}`
   try {
-    const p = redis.pipeline().incr(ipKey).expire(ipKey, 120)
-    if (payerKey) p.incr(payerKey).expire(payerKey, 120)
-    const res = await p.exec<number[]>()
-    const retryAfterSeconds = 60 - (now % 60)
-    if (res[0] > X402_RATE_LIMIT_PER_MINUTE) return { limited: true, scope: 'ip', retryAfterSeconds }
-    if (payerKey && res[2] > X402_RATE_LIMIT_PER_MINUTE) return { limited: true, scope: 'payer', retryAfterSeconds }
-    return { limited: false }
+    const [count] = await redis.pipeline().incr(windowKey).expire(windowKey, 120).exec<[number, number]>()
+    return count > X402_RATE_LIMIT_PER_MINUTE ? { limited: true, retryAfterSeconds: 60 - (now % 60) } : { limited: false }
   } catch (err) {
     console.error('[x402] rate limit store unavailable — allowing request', err)
     return { limited: false }
   }
+}
+
+/** Per IP, counted before verification: caps junk headers from one source. */
+export function consumeIpLimit(ip: string): Promise<RateLimitResult> {
+  return consume(`x402:rl:ip:${ip}`)
+}
+
+/**
+ * Per payer, counted only AFTER the facilitator has verified the payment, so
+ * the address is one the caller proved control of. A forged X-PAYMENT naming
+ * someone else's address fails verification and never touches their quota.
+ */
+export function consumePayerLimit(payer: string): Promise<RateLimitResult> {
+  return consume(`x402:rl:payer:${payer.toLowerCase()}`)
 }

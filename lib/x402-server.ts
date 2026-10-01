@@ -4,7 +4,7 @@ import { exact } from 'x402/schemes'
 import { findMatchingPaymentRequirements, processPriceToAtomicAmount } from 'x402/shared'
 import { useFacilitator } from 'x402/verify'
 import { createFacilitatorConfig } from '@coinbase/x402'
-import { clientIp, consumeX402RateLimit } from '@/lib/x402-abuse'
+import { clientIp, consumeIpLimit, consumePayerLimit } from '@/lib/x402-abuse'
 import { settleResponseHeader } from 'x402/types'
 import type { FacilitatorConfig, HTTPRequestStructure, Network, PaymentPayload, PaymentRequirements, Price, SettleResponse } from 'x402/types'
 
@@ -163,15 +163,11 @@ export async function settlePayment(
   return { ok: true, settlement }
 }
 
-/** Payer address claimed by an X-PAYMENT header, or null. Unverified: only a rate-limit key. */
-function payerOf(header: string | null): string | null {
-  if (!header) return null
-  try {
-    const from = (exact.evm.decodePayment(header).payload as { authorization?: { from?: unknown } }).authorization?.from
-    return typeof from === 'string' && /^0x[0-9a-fA-F]{40}$/.test(from) ? from : null
-  } catch {
-    return null
-  }
+function rateLimited(scope: 'ip' | 'payer', retryAfterSeconds: number) {
+  return NextResponse.json(
+    { error: 'RateLimited', message: `too many requests from this ${scope} this minute`, scope, retryAfterSeconds },
+    { status: 429, headers: { 'Retry-After': String(retryAfterSeconds) } }
+  )
 }
 
 /**
@@ -190,18 +186,21 @@ export async function withPayment(
   resource: PaidResource,
   handler: () => Promise<NextResponse>
 ): Promise<NextResponse> {
-  // Rate limit before any facilitator call or RPC read: unsettled 4xx answers
-  // are free, so this is what caps the cost of junk or replayed payments.
-  const rl = await consumeX402RateLimit(clientIp(request), payerOf(request.headers.get('X-PAYMENT')))
-  if (rl.limited) {
-    return NextResponse.json(
-      { error: 'RateLimited', message: `too many requests from this ${rl.scope} this minute`, scope: rl.scope, retryAfterSeconds: rl.retryAfterSeconds },
-      { status: 429, headers: { 'Retry-After': String(rl.retryAfterSeconds) } }
-    )
-  }
+  // Per IP before any facilitator call or RPC read: unsettled 4xx answers are
+  // free, so this caps what junk or replayed payments can cost us.
+  const ipLimit = await consumeIpLimit(clientIp(request))
+  if (ipLimit.limited) return rateLimited('ip', ipLimit.retryAfterSeconds)
 
   const verified = await verifyPayment(request, price, resource)
   if (!verified.ok) return verified.response
+
+  // Per payer only once the facilitator has verified the signature, so the
+  // address is the caller's own. Checked before the handler's RPC reads.
+  const from = (verified.payment.payload.payload as { authorization?: { from?: unknown } }).authorization?.from
+  if (typeof from === 'string') {
+    const payerLimit = await consumePayerLimit(from)
+    if (payerLimit.limited) return rateLimited('payer', payerLimit.retryAfterSeconds)
+  }
 
   const response = await handler()
   if (response.status < 200 || response.status >= 300) return response
