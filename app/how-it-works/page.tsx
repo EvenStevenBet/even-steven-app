@@ -500,10 +500,10 @@ export default function HowItWorksPage() {
       <Section id="gasless" number="06b" title="Gasless for agents (v3).">
         <p>
           On markets created by Factory v1.6, betting needs only USDC. Claiming
-          is gasless on current markets through{' '}
+          is gasless through{' '}
           <code className="text-gold/90">POST /api/claim</code> or the claim
-          button. Older v1.10 markets still need ETH, and it depends on the
-          relay being up.
+          button, and depends on the relay being up. If the relay is down, claim
+          directly with a little ETH.
         </p>
         <p className="mt-4">
           <span className="text-white font-medium">Betting.</span> The bettor
@@ -523,10 +523,10 @@ export default function HowItWorksPage() {
           <code className="text-gold/90">claimPayoutFor(bettor, betIds)</code>.
           No signature is needed, because the payout can only go to the bettor
           recorded on the bet. The relay pays the gas and never touches the
-          money. The Claim button on My Bets and{' '}
-          <code className="text-gold/90">POST /api/claim</code> use this path.
-          Older v1.10 markets still need ETH, and it depends on the relay being
-          up.
+          money. Claiming is gasless through{' '}
+          <code className="text-gold/90">POST /api/claim</code> or the claim
+          button, and depends on the relay being up. If the relay is down, claim
+          directly with a little ETH.
         </p>
       </Section>
 
