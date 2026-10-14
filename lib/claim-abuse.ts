@@ -11,7 +11,7 @@ const url = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL
 const token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN
 const redis = url && token ? new Redis({ url, token, retry: { retries: 1 } }) : null
 
-export const CLAIM_LOCK_TTL_SECONDS = 300
+export const CLAIM_LOCK_TTL_SECONDS = 60
 export const CLAIM_RATE_LIMIT_PER_MINUTE = 10
 
 function store(): Redis {
@@ -31,15 +31,24 @@ export async function consumeClaimRateLimit(ip: string): Promise<{ limited: bool
 
 /**
  * SET NX: true only for the first caller claiming for this market + bettor.
- * Held for the full TTL after a submission, so a repeat request cannot send a
- * second transaction for the same bets while the first is in flight.
+ * Held for the TTL after a submission, so a repeat request cannot send a
+ * second transaction for the same bets while the first is in flight. Short on
+ * purpose: claiming is idempotent and a duplicate only reverts.
  */
 export async function acquireClaimLock(market: string, bettor: string): Promise<boolean> {
   const res = await store().set(lockKey(market, bettor), Date.now(), { nx: true, ex: CLAIM_LOCK_TTL_SECONDS })
   return res === 'OK'
 }
 
-/** Only for failures before submission. A failed release just leaves the lock to expire. */
+/**
+ * Pushes the lock's expiry out to a full TTL from now, so a multi-chunk claim
+ * holds it for the whole request. Throws when the store is unavailable.
+ */
+export async function refreshClaimLock(market: string, bettor: string): Promise<void> {
+  await store().expire(lockKey(market, bettor), CLAIM_LOCK_TTL_SECONDS)
+}
+
+/** For a request that ends with no transaction in flight. A failed release just leaves the lock to expire. */
 export async function releaseClaimLock(market: string, bettor: string): Promise<void> {
   try {
     await store().del(lockKey(market, bettor))
