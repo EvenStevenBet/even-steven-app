@@ -40,7 +40,15 @@ export async function acquireClaimLock(market: string, bettor: string): Promise<
   return res === 'OK'
 }
 
-/** For failures before submission and for a mined revert. A failed release just leaves the lock to expire. */
+/**
+ * Pushes the lock's expiry out to a full TTL from now, so a multi-chunk claim
+ * holds it for the whole request. Throws when the store is unavailable.
+ */
+export async function refreshClaimLock(market: string, bettor: string): Promise<void> {
+  await store().expire(lockKey(market, bettor), CLAIM_LOCK_TTL_SECONDS)
+}
+
+/** For a request that ends with no transaction in flight. A failed release just leaves the lock to expire. */
 export async function releaseClaimLock(market: string, bettor: string): Promise<void> {
   try {
     await store().del(lockKey(market, bettor))

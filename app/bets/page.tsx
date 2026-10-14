@@ -6,7 +6,7 @@ import { BaseError } from 'viem'
 import { useAccount, usePublicClient, useWriteContract } from 'wagmi'
 import { ConnectWalletModal } from '@/components/ConnectWalletModal'
 import { BASESCAN_URL } from '@/lib/chain'
-import { marketAbi } from '@/lib/contracts'
+import { factoryAbi, marketAbi, V1_6_FACTORY } from '@/lib/contracts'
 import { enrichMarket } from '@/lib/markets'
 import type { MarketRow, ParsedMarket } from '@/lib/markets'
 import { formatUsdc } from '@/lib/format'
@@ -26,21 +26,38 @@ function betSide(bet: WalletBet): Side {
   return bet.side
 }
 
+type Hex = `0x${string}`
+
+interface RelayIncomplete {
+  error: string
+  message: string
+  txHash?: Hex
+  retryAfterSeconds?: number
+}
+
 type RelayClaim =
-  | { kind: 'claimed'; txHash: `0x${string}`; betIds: bigint[] }
-  | { kind: 'pending'; txHash: `0x${string}` }
+  | { kind: 'claimed'; txHashes: Hex[]; betIds: bigint[]; remainingCount: number; incomplete?: RelayIncomplete }
+  | { kind: 'nothing' }
+  | { kind: 'pending'; txHash: Hex }
+  | { kind: 'busy'; retryAfterSeconds: number }
   | { kind: 'unsupported' }
   | { kind: 'unavailable' }
 
-// How long to wait for a relayed claim the route answered 504 SubmissionPending
+// How long to wait for a relayed claim the route answered SubmissionPending
 // for (it already waited 15s). A dropped tx then errors instead of hanging.
 const PENDING_CLAIM_TIMEOUT_MS = 120_000
+// One request claims up to 200 bets (8 x 25); a market holds at most 1000.
+const MAX_CLAIM_REQUESTS = 6
+const MAX_BUSY_RETRIES = 2
 const RELAY_UNAVAILABLE_MESSAGE = "Relay unavailable — you'll need ETH in your wallet to claim."
+const LEGACY_MARKET_MESSAGE = 'Older market — claiming needs a small amount of ETH in your wallet for gas.'
+// Relay-side errors that mean it can submit nothing more right now.
+const RELAY_DOWN_ERRORS = new Set(['RelayUnderfunded', 'RelayNotConfigured', 'LockServiceUnavailable'])
 
 // A relay error that still carries a submitted tx (SubmissionReverted,
 // CustodyInvariantViolated), so the BaseScan link survives into the error state.
 class RelayClaimError extends Error {
-  constructor(message: string, readonly txHash?: `0x${string}`) {
+  constructor(message: string, readonly txHash?: Hex) {
     super(message)
   }
 }
@@ -53,21 +70,34 @@ async function relayClaim(marketAddress: string, bettor: string): Promise<RelayC
   })
   const data = await res.json().catch(() => ({}))
   if (res.ok) {
-    if (!data.txHash) throw new Error('Nothing left to claim on this market — refresh to update.')
-    return { kind: 'claimed', txHash: data.txHash, betIds: (data.betIds as string[]).map(id => BigInt(id)) }
+    if (!data.txHashes?.length) return { kind: 'nothing' }
+    return {
+      kind: 'claimed',
+      txHashes: data.txHashes,
+      betIds: (data.betIds as string[]).map(id => BigInt(id)),
+      remainingCount: data.remainingCount ?? 0,
+      incomplete: data.incomplete,
+    }
   }
   if (res.status === 504 && data.txHash) return { kind: 'pending', txHash: data.txHash }
+  if (data.error === 'RelayBusy') return { kind: 'busy', retryAfterSeconds: data.retryAfterSeconds ?? 5 }
   if (data.error === 'UnsupportedMarket') return { kind: 'unsupported' }
   if (res.status === 503) return { kind: 'unavailable' }
   if (res.status === 429) throw new Error('Too many claim requests — wait a minute and try again.')
   throw new RelayClaimError(data.message ?? `Claim failed (HTTP ${res.status}).`, data.txHash)
 }
 
-type ClaimStep = 'idle' | 'relay_unavailable' | 'awaiting_signature' | 'confirming' | 'success' | 'error'
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+// needs_wallet: the relay can't take this claim; the user has been told they
+// pay gas, and the next click claims from the wallet.
+type ClaimStep = 'idle' | 'needs_wallet' | 'awaiting_signature' | 'confirming' | 'success' | 'error'
 interface ClaimState {
   step: ClaimStep
-  txHash?: `0x${string}`
+  txHash?: Hex
   error?: string
+  notice?: string
+  progress?: { claimed: number; total: number }
 }
 
 export default function BetsPage() {
@@ -107,6 +137,8 @@ export default function BetsPage() {
   )
 
   const [claimStates, setClaimStates] = useState<Record<string, ClaimState>>({})
+  // Claimable markets not created by Factory v1.6 (no claimPayoutFor), keyed by address.
+  const [legacyMarkets, setLegacyMarkets] = useState<Record<string, boolean>>({})
 
   const active = bets.filter(b => b.status === 'active')
   const awaiting = bets.filter(b => b.status === 'awaiting')
@@ -122,12 +154,46 @@ export default function BetsPage() {
     return map
   }, [claimable])
 
+  // Find older markets up front, so the ETH notice shows before the click.
+  const claimableMarketKey = Array.from(claimableByMarket.keys()).sort().join(',')
+  useEffect(() => {
+    if (!publicClient || !claimableMarketKey) return
+    const addresses = claimableMarketKey.split(',') as Hex[]
+    let cancelled = false
+    publicClient
+      .multicall({
+        contracts: addresses.map(address => ({
+          address: V1_6_FACTORY,
+          abi: factoryAbi,
+          functionName: 'gameIdByMarket' as const,
+          args: [address] as const,
+        })),
+      })
+      .then(results => {
+        if (cancelled) return
+        const legacy: Record<string, boolean> = {}
+        // A failed read stays unknown; the route's 409 still surfaces the notice.
+        results.forEach((r, i) => {
+          if (r.status === 'success') legacy[addresses[i]] = r.result === ''
+        })
+        setLegacyMarkets(prev => ({ ...prev, ...legacy }))
+      })
+      .catch(err => console.error('legacy market check failed:', err))
+    return () => {
+      cancelled = true
+    }
+  }, [publicClient, claimableMarketKey])
+
+  function claimStateFor(key: string, marketAddress: string): ClaimState | undefined {
+    return claimStates[key] ?? (legacyMarkets[marketAddress] ? { step: 'needs_wallet', notice: LEGACY_MARKET_MESSAGE } : undefined)
+  }
+
   // Claims go through the relay (POST /api/claim): the wallet only identifies
-  // the bettor, signs nothing and needs no ETH. The relay claims every bet the
-  // bettor is owed on the market in one claimPayoutFor. Markets older than
-  // Factory v1.6 have no claimPayoutFor and fall back to the wallet claiming
-  // directly. A 503 (relay submitted nothing) never falls back silently: the
-  // user is told they'll pay gas and must click again to claim from the wallet.
+  // the bettor, signs nothing and needs no ETH. Each request claims up to 200
+  // of the bettor's bets on the market (25 per tx); this loops until
+  // remainingCount is 0. Nothing falls back to the wallet silently: older
+  // markets (no claimPayoutFor) and a relay that can't submit show a notice
+  // first, and only the next click claims from the wallet, paying gas.
   async function runClaim(
     key: string,
     marketAddress: string,
@@ -135,19 +201,26 @@ export default function BetsPage() {
     walletCall: { functionName: 'claimPayout'; args: [bigint] } | { functionName: 'claimAllPayouts' }
   ) {
     if (!publicClient || !address) return
-    const viaWallet = claimStates[key]?.step === 'relay_unavailable'
-    setClaimStates(prev => ({ ...prev, [key]: { step: 'confirming' } }))
+    const viaWallet = claimStateFor(key, marketAddress)?.step === 'needs_wallet'
+    const set = (state: ClaimState) => setClaimStates(prev => ({ ...prev, [key]: state }))
+    let txHash: Hex | undefined
+    let progress = { claimed: 0, total: marketBets.length }
+
+    const waitForPending = async (hash: Hex) => {
+      txHash = hash
+      set({ step: 'confirming', txHash, progress })
+      const receipt = await publicClient
+        .waitForTransactionReceipt({ hash, timeout: PENDING_CLAIM_TIMEOUT_MS })
+        .catch(() => {
+          throw new RelayClaimError('Claim not confirmed after 2 minutes and may have been dropped. Check BaseScan, then try again.', hash)
+        })
+      if (receipt.status !== 'success') throw new RelayClaimError('Claim transaction reverted on-chain.', hash)
+    }
+
     try {
-      const relayed: RelayClaim = viaWallet ? { kind: 'unsupported' } : await relayClaim(marketAddress, address)
-      if (relayed.kind === 'unavailable') {
-        setClaimStates(prev => ({ ...prev, [key]: { step: 'relay_unavailable' } }))
-        return
-      }
-      let hash: `0x${string}`
-      let claimedIds = marketBets.map(b => b.betId)
-      if (relayed.kind === 'unsupported') {
-        setClaimStates(prev => ({ ...prev, [key]: { step: 'awaiting_signature' } }))
-        const addr = marketAddress as `0x${string}`
+      if (viaWallet) {
+        set({ step: 'awaiting_signature' })
+        const addr = marketAddress as Hex
         const gas = await publicClient.estimateContractGas({
           address: addr,
           abi: marketAbi,
@@ -155,41 +228,80 @@ export default function BetsPage() {
           account: address,
           dataSuffix: attributionSuffix(),
         })
-        hash = await writeContractAsync({
+        txHash = await writeContractAsync({
           address: addr,
           abi: marketAbi,
           ...walletCall,
           gas: (gas * BigInt(120)) / BigInt(100),
           dataSuffix: attributionSuffix(),
         })
-        setClaimStates(prev => ({ ...prev, [key]: { step: 'confirming', txHash: hash } }))
-        const receipt = await publicClient.waitForTransactionReceipt({ hash })
+        set({ step: 'confirming', txHash })
+        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash })
         if (receipt.status !== 'success') throw new Error(`${walletCall.functionName} transaction reverted on-chain.`)
-      } else {
-        hash = relayed.txHash
-        if (relayed.kind === 'claimed') {
-          claimedIds = relayed.betIds
-        } else {
-          // Submitted but not mined within the route's window — wait it out here.
-          setClaimStates(prev => ({ ...prev, [key]: { step: 'confirming', txHash: hash } }))
-          const receipt = await publicClient
-            .waitForTransactionReceipt({ hash, timeout: PENDING_CLAIM_TIMEOUT_MS })
-            .catch(() => {
-              throw new Error('Claim not confirmed after 2 minutes and may have been dropped. Check BaseScan, then try again.')
-            })
-          if (receipt.status !== 'success') throw new Error('Claim transaction reverted on-chain.')
-        }
+        set({ step: 'success', txHash })
+        markClaimed(marketAddress, walletCall.functionName === 'claimPayout' ? walletCall.args : marketBets.map(b => b.betId))
+        return
       }
-      setClaimStates(prev => ({ ...prev, [key]: { step: 'success', txHash: hash } }))
-      markClaimed(marketAddress, claimedIds)
+
+      set({ step: 'confirming', progress })
+      let notice: string | undefined
+      for (let request = 0, busyRetries = 0; request < MAX_CLAIM_REQUESTS; request++) {
+        const r = await relayClaim(marketAddress, address)
+
+        if (r.kind === 'unsupported' || r.kind === 'unavailable') {
+          if (r.kind === 'unsupported') setLegacyMarkets(prev => ({ ...prev, [marketAddress]: true }))
+          set({ step: 'needs_wallet', txHash, progress, notice: r.kind === 'unsupported' ? LEGACY_MARKET_MESSAGE : RELAY_UNAVAILABLE_MESSAGE })
+          return
+        }
+        if (r.kind === 'busy') {
+          if (busyRetries++ >= MAX_BUSY_RETRIES) throw new RelayClaimError('Relay busy — try again in a few seconds.', txHash)
+          await delay(r.retryAfterSeconds * 1000)
+          request--
+          continue
+        }
+        if (r.kind === 'nothing') {
+          if (progress.claimed === 0) throw new Error('Nothing left to claim on this market — refresh to update.')
+          break
+        }
+        if (r.kind === 'pending') {
+          // Which bets that tx covers isn't known here, and the relay holds the
+          // claim lock until it expires, so stop after it confirms.
+          await waitForPending(r.txHash)
+          notice = 'Confirmed. If any bets still show as claimable, claim again in a minute.'
+          break
+        }
+
+        markClaimed(marketAddress, r.betIds)
+        txHash = r.txHashes[r.txHashes.length - 1]
+        progress = { claimed: progress.claimed + r.betIds.length, total: progress.claimed + r.betIds.length + r.remainingCount }
+        set({ step: 'confirming', txHash, progress })
+
+        const inc = r.incomplete
+        if (inc) {
+          if (inc.error === 'SubmissionPending' && inc.txHash) {
+            await waitForPending(inc.txHash)
+            notice = 'Confirmed. If any bets still show as claimable, claim again in a minute.'
+            break
+          }
+          if (inc.error === 'RelayBusy') {
+            if (busyRetries++ >= MAX_BUSY_RETRIES) throw new RelayClaimError('Relay busy — try again in a few seconds.', txHash)
+            await delay((inc.retryAfterSeconds ?? 5) * 1000)
+            continue
+          }
+          if (RELAY_DOWN_ERRORS.has(inc.error)) {
+            set({ step: 'needs_wallet', txHash, progress, notice: RELAY_UNAVAILABLE_MESSAGE })
+            return
+          }
+          throw new RelayClaimError(inc.message, inc.txHash ?? txHash)
+        }
+        if (r.remainingCount === 0) break
+      }
+      set({ step: 'success', txHash, progress, notice })
     } catch (err) {
       console.error('claim failed:', err)
       // Keep any submitted txHash so the BaseScan link survives the error.
-      const txHash = err instanceof RelayClaimError ? err.txHash : undefined
-      setClaimStates(prev => ({
-        ...prev,
-        [key]: { step: 'error', error: describeError(err), txHash: txHash ?? prev[key]?.txHash },
-      }))
+      const hash = (err instanceof RelayClaimError ? err.txHash : undefined) ?? txHash
+      set({ step: 'error', error: describeError(err), txHash: hash, progress })
     }
   }
 
@@ -282,7 +394,7 @@ export default function BetsPage() {
                 <div key={`${marketAddress}-all-claim`} className="flex justify-end mb-1">
                   <ClaimAllButton
                     marketBets={marketBets}
-                    state={claimStates[`${marketAddress}-all`]}
+                    state={claimStateFor(`${marketAddress}-all`, marketAddress)}
                     onClaim={() => claimAll(marketAddress, marketBets)}
                   />
                 </div>
@@ -292,7 +404,7 @@ export default function BetsPage() {
               <ClaimableBetCard
                 key={`${bet.market.marketAddress}-${bet.betId}`}
                 bet={bet}
-                state={claimStates[`${bet.market.marketAddress}-${bet.betId}`]}
+                state={claimStateFor(`${bet.market.marketAddress}-${bet.betId}`, bet.market.marketAddress)}
                 onClaim={() => claimOne(bet)}
               />
             ))}
@@ -405,6 +517,11 @@ function AwaitingBetCard({ bet }: { bet: WalletBet }) {
   )
 }
 
+function progressLabel(state: ClaimState | undefined): string {
+  const p = state?.progress
+  return p && p.total > 1 ? `Claiming… ${p.claimed}/${p.total}` : 'Claiming…'
+}
+
 function ClaimableBetCard({
   bet,
   state,
@@ -434,14 +551,14 @@ function ClaimableBetCard({
             {step === 'awaiting_signature'
               ? 'Confirm in wallet…'
               : step === 'confirming'
-                ? 'Claiming…'
-                : step === 'relay_unavailable'
+                ? progressLabel(state)
+                : step === 'needs_wallet'
                   ? 'Claim with wallet'
                   : 'Claim'}
           </button>
         )}
       </div>
-      {step === 'relay_unavailable' && <p className="text-xs text-amber-400">{RELAY_UNAVAILABLE_MESSAGE}</p>}
+      {state?.notice && <p className="text-xs text-amber-400">{state.notice}</p>}
       {step === 'error' && state?.error && <p className="text-xs text-red-400">{state.error}</p>}
       {state?.txHash && (
         <a
@@ -474,13 +591,15 @@ function ClaimAllButton({
   return (
     <div className="flex flex-col items-end gap-1">
       <button type="button" onClick={onClaim} disabled={busy} className="btn-ghost text-xs px-4 py-2">
-        {busy
-          ? 'Claiming all…'
-          : step === 'relay_unavailable'
-            ? `Claim all with wallet — ${total} USDC`
-            : `Claim all (${marketBets.length}) — ${total} USDC`}
+        {step === 'awaiting_signature'
+          ? 'Confirm in wallet…'
+          : busy
+            ? progressLabel(state)
+            : step === 'needs_wallet'
+              ? `Claim all with wallet — ${total} USDC`
+              : `Claim all (${marketBets.length}) — ${total} USDC`}
       </button>
-      {step === 'relay_unavailable' && <p className="text-xs text-amber-400">{RELAY_UNAVAILABLE_MESSAGE}</p>}
+      {state?.notice && <p className="text-xs text-amber-400">{state.notice}</p>}
       {step === 'error' && state?.error && <p className="text-xs text-red-400">{state.error}</p>}
       {state?.txHash && (
         <a

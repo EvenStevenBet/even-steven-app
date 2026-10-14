@@ -17,6 +17,7 @@ export const maxDuration = 300
 
 const MAX_CLAIMS_PER_RUN = 20
 // Stop starting new claims with enough headroom for the last receipt wait (15s).
+// runClaim itself starts no chunk it cannot finish by SOFT_DEADLINE_MS + 30s.
 const SOFT_DEADLINE_MS = 240_000
 // Errors after which no further claim in this run could succeed.
 const STOP_RUN_ERRORS = new Set(['RelayUnderfunded', 'RelayNotConfigured', 'LockServiceUnavailable'])
@@ -49,7 +50,10 @@ async function handle(request: NextRequest) {
   }
 }
 
-type Claimed = { marketAddress: Address; bettor: Address; betIds: string[]; amount: string; txHash: string }
+type Claimed = {
+  marketAddress: Address; bettor: Address; betIds: string[]; amount: string; txHash: string
+  txHashes: string[]; remainingCount: number; incomplete?: string
+}
 type Failed = { marketAddress: Address; bettor: Address; error: string; message: string; txHash?: unknown }
 
 async function run() {
@@ -115,12 +119,14 @@ async function run() {
     if (claims.length >= MAX_CLAIMS_PER_RUN) { stoppedBy = 'MaxClaimsPerRun'; break }
     if (Date.now() - started > SOFT_DEADLINE_MS) { stoppedBy = 'TimeBudget'; break }
 
-    const outcome = await runClaim(market, bettor, '[api/claim/auto]')
+    const outcome = await runClaim(market, bettor, '[api/claim/auto]', started + SOFT_DEADLINE_MS + 30_000)
     if (outcome.kind === 'claimed') {
       claims.push({
         marketAddress: market, bettor, betIds: outcome.betIds.map(String),
         amount: outcome.amount.toString(), txHash: outcome.txHash,
+        txHashes: outcome.txHashes, remainingCount: outcome.remainingCount, incomplete: outcome.incomplete?.error,
       })
+      if (outcome.incomplete && STOP_RUN_ERRORS.has(outcome.incomplete.error)) { stoppedBy = outcome.incomplete.error; break }
     } else if (outcome.kind === 'error') {
       // ClaimInFlight just means POST /api/claim got there first.
       if (outcome.error !== 'ClaimInFlight') {

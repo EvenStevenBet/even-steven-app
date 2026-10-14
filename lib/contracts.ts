@@ -101,7 +101,11 @@ export const erc20Abi = parseAbi([
   'event Transfer(address indexed from, address indexed to, uint256 value)',
 ])
 
-// Fragments for the SportsbookFactory contract — server-side agent API only.
+// SportsbookFactory v1.6: only markets it created are SportsbookMarket v1.11
+// and expose claimPayoutFor. Pinned rather than read from NEXT_PUBLIC_FACTORY_ADDRESS.
+export const V1_6_FACTORY = '0x5906370b9831728ec523b647137a1bbf0ab45390' as const
+
+// Fragments for the SportsbookFactory contract.
 // Signatures confirmed against SportsbookFactory-v1_4.sol.
 export const factoryAbi = parseAbi([
   'function getOpenMarkets() view returns (address[])',

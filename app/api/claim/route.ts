@@ -4,7 +4,10 @@ import { runClaim } from '@/lib/claim'
 import { clientIp, consumeClaimRateLimit, CLAIM_RATE_LIMIT_PER_MINUTE } from '@/lib/claim-abuse'
 
 export const dynamic = 'force-dynamic'
-export const maxDuration = 30
+// Up to CLAIM_MAX_CHUNKS sequential transactions; runClaim starts no chunk it
+// cannot finish inside DEADLINE_MS.
+export const maxDuration = 120
+const DEADLINE_MS = (maxDuration - 10) * 1000
 
 function fail(status: number, error: string, message: string, details: Record<string, unknown> = {}) {
   return NextResponse.json({ error, message, ...details }, { status })
@@ -24,6 +27,7 @@ export async function POST(request: NextRequest) {
 }
 
 async function handle(request: NextRequest) {
+  const started = Date.now()
   // No x402 gate: claiming is free; the relay pays the gas.
   // 0. Per-IP rate limit, fail closed
   const ip = clientIp(request)
@@ -57,9 +61,11 @@ async function handle(request: NextRequest) {
   if (bettor === zeroAddress) return fail(400, 'InvalidBettor', 'bettor cannot be the zero address')
 
   // 2. Everything else — market check, claimable set, lock, submission, receipt checks
-  const outcome = await runClaim(marketAddress, bettor, '[api/claim]')
+  const outcome = await runClaim(marketAddress, bettor, '[api/claim]', started + DEADLINE_MS)
   if (outcome.kind === 'error') return fail(outcome.status, outcome.error, outcome.message, outcome.details)
-  if (outcome.kind === 'nothing') return NextResponse.json({ claimed: [], note: 'Nothing claimable' })
+  if (outcome.kind === 'nothing') {
+    return NextResponse.json({ claimed: [], note: 'Nothing claimable', txHashes: [], claimedCount: 0, remainingCount: 0 })
+  }
 
   return NextResponse.json({
     success: true,
@@ -67,7 +73,11 @@ async function handle(request: NextRequest) {
     marketAddress,
     betIds: outcome.betIds.map(String),
     amount: outcome.amount.toString(),
+    txHashes: outcome.txHashes,
     txHash: outcome.txHash,
+    claimedCount: outcome.betIds.length,
+    remainingCount: outcome.remainingCount,
     relay: outcome.relay,
+    ...(outcome.incomplete ? { incomplete: { ...outcome.incomplete.details, error: outcome.incomplete.error, message: outcome.incomplete.message } } : {}),
   })
 }
