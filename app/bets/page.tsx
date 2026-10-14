@@ -26,7 +26,44 @@ function betSide(bet: WalletBet): Side {
   return bet.side
 }
 
-type ClaimStep = 'idle' | 'awaiting_signature' | 'confirming' | 'success' | 'error'
+type RelayClaim =
+  | { kind: 'claimed'; txHash: `0x${string}`; betIds: bigint[] }
+  | { kind: 'pending'; txHash: `0x${string}` }
+  | { kind: 'unsupported' }
+  | { kind: 'unavailable' }
+
+// How long to wait for a relayed claim the route answered 504 SubmissionPending
+// for (it already waited 15s). A dropped tx then errors instead of hanging.
+const PENDING_CLAIM_TIMEOUT_MS = 120_000
+const RELAY_UNAVAILABLE_MESSAGE = "Relay unavailable — you'll need ETH in your wallet to claim."
+
+// A relay error that still carries a submitted tx (SubmissionReverted,
+// CustodyInvariantViolated), so the BaseScan link survives into the error state.
+class RelayClaimError extends Error {
+  constructor(message: string, readonly txHash?: `0x${string}`) {
+    super(message)
+  }
+}
+
+async function relayClaim(marketAddress: string, bettor: string): Promise<RelayClaim> {
+  const res = await fetch('/api/claim', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ marketAddress, bettor }),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (res.ok) {
+    if (!data.txHash) throw new Error('Nothing left to claim on this market — refresh to update.')
+    return { kind: 'claimed', txHash: data.txHash, betIds: (data.betIds as string[]).map(id => BigInt(id)) }
+  }
+  if (res.status === 504 && data.txHash) return { kind: 'pending', txHash: data.txHash }
+  if (data.error === 'UnsupportedMarket') return { kind: 'unsupported' }
+  if (res.status === 503) return { kind: 'unavailable' }
+  if (res.status === 429) throw new Error('Too many claim requests — wait a minute and try again.')
+  throw new RelayClaimError(data.message ?? `Claim failed (HTTP ${res.status}).`, data.txHash)
+}
+
+type ClaimStep = 'idle' | 'relay_unavailable' | 'awaiting_signature' | 'confirming' | 'success' | 'error'
 interface ClaimState {
   step: ClaimStep
   txHash?: `0x${string}`
@@ -85,68 +122,87 @@ export default function BetsPage() {
     return map
   }, [claimable])
 
-  async function claimOne(bet: WalletBet) {
-    if (!publicClient) return
-    const key = `${bet.market.marketAddress}-${bet.betId}`
-    setClaimStates(prev => ({ ...prev, [key]: { step: 'awaiting_signature' } }))
+  // Claims go through the relay (POST /api/claim): the wallet only identifies
+  // the bettor, signs nothing and needs no ETH. The relay claims every bet the
+  // bettor is owed on the market in one claimPayoutFor. Markets older than
+  // Factory v1.6 have no claimPayoutFor and fall back to the wallet claiming
+  // directly. A 503 (relay submitted nothing) never falls back silently: the
+  // user is told they'll pay gas and must click again to claim from the wallet.
+  async function runClaim(
+    key: string,
+    marketAddress: string,
+    marketBets: WalletBet[],
+    walletCall: { functionName: 'claimPayout'; args: [bigint] } | { functionName: 'claimAllPayouts' }
+  ) {
+    if (!publicClient || !address) return
+    const viaWallet = claimStates[key]?.step === 'relay_unavailable'
+    setClaimStates(prev => ({ ...prev, [key]: { step: 'confirming' } }))
     try {
-      const marketAddress = bet.market.marketAddress as `0x${string}`
-      const gas = await publicClient.estimateContractGas({
-        address: marketAddress,
-        abi: marketAbi,
-        functionName: 'claimPayout',
-        args: [bet.betId],
-        account: address,
-        dataSuffix: attributionSuffix(),
-      })
-      const hash = await writeContractAsync({
-        address: marketAddress,
-        abi: marketAbi,
-        functionName: 'claimPayout',
-        args: [bet.betId],
-        gas: (gas * BigInt(120)) / BigInt(100),
-        dataSuffix: attributionSuffix(),
-      })
-      setClaimStates(prev => ({ ...prev, [key]: { step: 'confirming', txHash: hash } }))
-      const receipt = await publicClient.waitForTransactionReceipt({ hash })
-      if (receipt.status !== 'success') throw new Error('claimPayout transaction reverted on-chain.')
+      const relayed: RelayClaim = viaWallet ? { kind: 'unsupported' } : await relayClaim(marketAddress, address)
+      if (relayed.kind === 'unavailable') {
+        setClaimStates(prev => ({ ...prev, [key]: { step: 'relay_unavailable' } }))
+        return
+      }
+      let hash: `0x${string}`
+      let claimedIds = marketBets.map(b => b.betId)
+      if (relayed.kind === 'unsupported') {
+        setClaimStates(prev => ({ ...prev, [key]: { step: 'awaiting_signature' } }))
+        const addr = marketAddress as `0x${string}`
+        const gas = await publicClient.estimateContractGas({
+          address: addr,
+          abi: marketAbi,
+          ...walletCall,
+          account: address,
+          dataSuffix: attributionSuffix(),
+        })
+        hash = await writeContractAsync({
+          address: addr,
+          abi: marketAbi,
+          ...walletCall,
+          gas: (gas * BigInt(120)) / BigInt(100),
+          dataSuffix: attributionSuffix(),
+        })
+        setClaimStates(prev => ({ ...prev, [key]: { step: 'confirming', txHash: hash } }))
+        const receipt = await publicClient.waitForTransactionReceipt({ hash })
+        if (receipt.status !== 'success') throw new Error(`${walletCall.functionName} transaction reverted on-chain.`)
+      } else {
+        hash = relayed.txHash
+        if (relayed.kind === 'claimed') {
+          claimedIds = relayed.betIds
+        } else {
+          // Submitted but not mined within the route's window — wait it out here.
+          setClaimStates(prev => ({ ...prev, [key]: { step: 'confirming', txHash: hash } }))
+          const receipt = await publicClient
+            .waitForTransactionReceipt({ hash, timeout: PENDING_CLAIM_TIMEOUT_MS })
+            .catch(() => {
+              throw new Error('Claim not confirmed after 2 minutes and may have been dropped. Check BaseScan, then try again.')
+            })
+          if (receipt.status !== 'success') throw new Error('Claim transaction reverted on-chain.')
+        }
+      }
       setClaimStates(prev => ({ ...prev, [key]: { step: 'success', txHash: hash } }))
-      markClaimed(bet.market.marketAddress, [bet.betId])
+      markClaimed(marketAddress, claimedIds)
     } catch (err) {
-      console.error('claimPayout failed:', err)
-      setClaimStates(prev => ({ ...prev, [key]: { step: 'error', error: describeError(err) } }))
+      console.error('claim failed:', err)
+      // Keep any submitted txHash so the BaseScan link survives the error.
+      const txHash = err instanceof RelayClaimError ? err.txHash : undefined
+      setClaimStates(prev => ({
+        ...prev,
+        [key]: { step: 'error', error: describeError(err), txHash: txHash ?? prev[key]?.txHash },
+      }))
     }
   }
 
-  async function claimAll(marketAddress: string, marketBets: WalletBet[]) {
-    if (!publicClient) return
-    const key = `${marketAddress}-all`
-    setClaimStates(prev => ({ ...prev, [key]: { step: 'awaiting_signature' } }))
-    try {
-      const addr = marketAddress as `0x${string}`
-      const gas = await publicClient.estimateContractGas({
-        address: addr,
-        abi: marketAbi,
-        functionName: 'claimAllPayouts',
-        account: address,
-        dataSuffix: attributionSuffix(),
-      })
-      const hash = await writeContractAsync({
-        address: addr,
-        abi: marketAbi,
-        functionName: 'claimAllPayouts',
-        gas: (gas * BigInt(120)) / BigInt(100),
-        dataSuffix: attributionSuffix(),
-      })
-      setClaimStates(prev => ({ ...prev, [key]: { step: 'confirming', txHash: hash } }))
-      const receipt = await publicClient.waitForTransactionReceipt({ hash })
-      if (receipt.status !== 'success') throw new Error('claimAllPayouts transaction reverted on-chain.')
-      setClaimStates(prev => ({ ...prev, [key]: { step: 'success', txHash: hash } }))
-      markClaimed(marketAddress, marketBets.map(b => b.betId))
-    } catch (err) {
-      console.error('claimAllPayouts failed:', err)
-      setClaimStates(prev => ({ ...prev, [key]: { step: 'error', error: describeError(err) } }))
-    }
+  function claimOne(bet: WalletBet) {
+    const marketAddress = bet.market.marketAddress
+    return runClaim(`${marketAddress}-${bet.betId}`, marketAddress, claimableByMarket.get(marketAddress) ?? [bet], {
+      functionName: 'claimPayout',
+      args: [bet.betId],
+    })
+  }
+
+  function claimAll(marketAddress: string, marketBets: WalletBet[]) {
+    return runClaim(`${marketAddress}-all`, marketAddress, marketBets, { functionName: 'claimAllPayouts' })
   }
 
   if (!isConnected) {
@@ -375,10 +431,17 @@ function ClaimableBetCard({
           <span className="text-xs text-win">Claimed ✓</span>
         ) : (
           <button type="button" onClick={onClaim} disabled={busy} className="btn-gold text-xs px-4 py-2">
-            {step === 'awaiting_signature' ? 'Confirm in wallet…' : step === 'confirming' ? 'Claiming…' : 'Claim'}
+            {step === 'awaiting_signature'
+              ? 'Confirm in wallet…'
+              : step === 'confirming'
+                ? 'Claiming…'
+                : step === 'relay_unavailable'
+                  ? 'Claim with wallet'
+                  : 'Claim'}
           </button>
         )}
       </div>
+      {step === 'relay_unavailable' && <p className="text-xs text-amber-400">{RELAY_UNAVAILABLE_MESSAGE}</p>}
       {step === 'error' && state?.error && <p className="text-xs text-red-400">{state.error}</p>}
       {state?.txHash && (
         <a
@@ -406,13 +469,30 @@ function ClaimAllButton({
   const step = state?.step ?? 'idle'
   const busy = step === 'awaiting_signature' || step === 'confirming'
   if (step === 'success') return null
+  const total = formatUsdc(marketBets.reduce((sum, b) => sum + b.payout, BigInt(0)))
 
   return (
-    <button type="button" onClick={onClaim} disabled={busy} className="btn-ghost text-xs px-4 py-2">
-      {busy
-        ? 'Claiming all…'
-        : `Claim all (${marketBets.length}) — ${formatUsdc(marketBets.reduce((sum, b) => sum + b.payout, BigInt(0)))} USDC`}
-    </button>
+    <div className="flex flex-col items-end gap-1">
+      <button type="button" onClick={onClaim} disabled={busy} className="btn-ghost text-xs px-4 py-2">
+        {busy
+          ? 'Claiming all…'
+          : step === 'relay_unavailable'
+            ? `Claim all with wallet — ${total} USDC`
+            : `Claim all (${marketBets.length}) — ${total} USDC`}
+      </button>
+      {step === 'relay_unavailable' && <p className="text-xs text-amber-400">{RELAY_UNAVAILABLE_MESSAGE}</p>}
+      {step === 'error' && state?.error && <p className="text-xs text-red-400">{state.error}</p>}
+      {state?.txHash && (
+        <a
+          href={`${BASESCAN_URL}/tx/${state.txHash}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-xs text-gold underline underline-offset-2"
+        >
+          View transaction on BaseScan →
+        </a>
+      )}
+    </div>
   )
 }
 

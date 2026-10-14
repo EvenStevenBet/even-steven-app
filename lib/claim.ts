@@ -85,7 +85,8 @@ export async function findClaimableBetIds(market: Address, bettor: Address, rela
 /**
  * Finds everything claimable for bettor on a v1.11 market and claims it in one
  * relayed claimPayoutFor, holding the claim:{market}:{bettor} lock. The lock
- * is released on every exit before submission and kept after it.
+ * is released on every exit before submission and on a mined revert, and
+ * otherwise kept until it expires.
  */
 export async function runClaim(market: Address, bettor: Address, log = '[claim]'): Promise<ClaimOutcome> {
   if (!relayAccount || !relayWalletClient) {
@@ -157,7 +158,7 @@ export async function runClaim(market: Address, bettor: Address, log = '[claim]'
     return failure(503, 'RelayUnderfunded', 'relay wallet is below its ETH gas threshold; try again later')
   }
 
-  // 6. Submit. From here the lock is kept until it expires.
+  // 6. Submit. From here the lock is kept until it expires, unless the tx reverts.
   let txHash: Hash
   try {
     try {
@@ -180,6 +181,8 @@ export async function runClaim(market: Address, bettor: Address, log = '[claim]'
     return failure(504, 'SubmissionPending', 'transaction submitted but not yet mined; check txHash', { txHash })
   }
   if (receipt.status !== 'success') {
+    // Mined and reverted: nothing is in flight any more, so free the lock for a retry.
+    await releaseClaimLock(market, bettor)
     console.error(`${log} SubmissionReverted ${txHash}`)
     return failure(502, 'SubmissionReverted', 'claim transaction reverted on-chain', { txHash })
   }
