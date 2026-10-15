@@ -70,7 +70,11 @@ async function relayClaim(marketAddress: string, bettor: string): Promise<RelayC
   })
   const data = await res.json().catch(() => ({}))
   if (res.ok) {
-    if (!data.txHashes?.length) return { kind: 'nothing' }
+    if (!data.txHashes?.length) {
+      // Out of time before the first transaction (slow RPC): nothing was sent; retry shortly.
+      if (data.incomplete?.error === 'TimeBudgetExceeded') return { kind: 'busy', retryAfterSeconds: 5 }
+      return { kind: 'nothing' }
+    }
     return {
       kind: 'claimed',
       txHashes: data.txHashes,

@@ -66,6 +66,24 @@ async function handle(request: NextRequest) {
   if (outcome.kind === 'nothing') {
     return NextResponse.json({ claimed: [], note: 'Nothing claimable', txHashes: [], claimedCount: 0, remainingCount: 0 })
   }
+  if (outcome.kind === 'outOfTime') {
+    // Slow RPC left no time for even one transaction. Nothing was submitted
+    // and the lock is released, so calling again is safe.
+    return NextResponse.json({
+      success: true,
+      bettor,
+      marketAddress,
+      betIds: [],
+      amount: '0',
+      txHashes: [],
+      claimedCount: 0,
+      remainingCount: outcome.remainingCount,
+      incomplete: {
+        error: 'TimeBudgetExceeded',
+        message: 'ran out of time before the first transaction; nothing was submitted, call again',
+      },
+    })
+  }
 
   return NextResponse.json({
     success: true,
