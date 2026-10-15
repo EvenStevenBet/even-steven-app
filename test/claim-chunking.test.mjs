@@ -33,8 +33,15 @@ beforeEach(() => {
     sent: [],          // ids per submitted chunk
     receipts: new Map(),
     trace: [],         // acquire / send:N / refresh / release, in order
+    gameId: 'NFL-TEST', // '' = not a v1.6 market
+    code: '0x60',
+    readFail: {},      // readContract functionName or 'getCode' -> throw a non-revert RPC error
+    delayMs: {},       // 'multicall' | 'chunkSimulate' -> slow RPC
   }
 })
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const rpcError = () => Object.assign(new Error('HTTP request failed: request timed out'), { name: 'TimeoutError' })
 
 function receiptFor(ids) {
   const total = PAYOUT * BigInt(ids.length)
@@ -54,17 +61,30 @@ for (const level of ['log', 'warn', 'error']) mock.method(console, level, () => 
 
 const libUrl = (p) => new URL(`../lib/${p}.ts`, import.meta.url).href
 
-mock.module(libUrl('server-client'), {
+// lib/claim.ts reads only through lib/claim-rpc.ts; the constants mirror the real module.
+mock.module(libUrl('claim-rpc'), {
   exports: {
-    serverPublicClient: {
+    CLAIM_RPC_TIMEOUT_MS: 8_000,
+    CLAIM_RPC_RETRY_COUNT: 1,
+    CLAIM_RPC_WORST_CASE_MS: 16_150,
+    claimPublicClient: {
       readContract: async ({ functionName }) => {
-        if (functionName === 'gameIdByMarket') return 'NFL-TEST'
+        if (world.readFail[functionName]) throw rpcError()
+        if (functionName === 'gameIdByMarket') return world.gameId
         if (functionName === 'getBetsByAddress') return Array.from({ length: world.betCount }, (_, i) => BigInt(i))
         throw new Error(`unexpected readContract ${functionName}`)
       },
-      multicall: async ({ contracts }) => contracts.map(() => ({ bettor: BETTOR, claimed: false })),
-      getCode: async () => '0x60',
-      simulateContract: async ({ args }) => ({ request: { ids: args[1] } }),
+      multicall: async ({ contracts }) => {
+        if (world.delayMs.multicall) await sleep(world.delayMs.multicall)
+        return contracts.map(() => ({ bettor: BETTOR, claimed: false }))
+      },
+      getCode: async () => { if (world.readFail.getCode) throw rpcError(); return world.code },
+      getBalance: async () => 10n ** 18n,
+      simulateContract: async ({ args }) => {
+        // per-bet checks pass one id; a chunk passes the whole batch
+        if (args[1].length > 1 && world.delayMs.chunkSimulate) await sleep(world.delayMs.chunkSimulate)
+        return { request: { ids: args[1] } }
+      },
       waitForTransactionReceipt: async ({ hash }) => {
         const r = world.receipts.get(hash)
         if (r === 'pending') throw new Error('timed out')
@@ -91,7 +111,6 @@ mock.module(libUrl('relay'), {
         return hash
       },
     },
-    getRelayEthBalance: async () => 10n ** 18n,
     RELAY_MIN_ETH: 1n,
   },
 })
@@ -105,7 +124,7 @@ mock.module(libUrl('claim-abuse'), {
   },
 })
 
-const { runClaim, CLAIM_CHUNK_SIZE, CLAIM_MAX_CHUNKS } = await import(libUrl('claim'))
+const { runClaim, CLAIM_CHUNK_SIZE, CLAIM_MAX_CHUNKS, CLAIM_CHUNK_BUDGET_MS } = await import(libUrl('claim'))
 const run = (deadline = Date.now() + 3_600_000) => runClaim(MARKET, BETTOR, '[test]', deadline)
 const sendsAndRefreshes = (n) => Array.from({ length: n }, (_, i) => (i === 0 ? ['send:1'] : ['refresh', `send:${i + 1}`])).flat()
 
@@ -184,14 +203,57 @@ test('chunk 1 pending -> 504 SubmissionPending error, lock kept', async () => {
   assert.deepEqual(world.trace, ['acquire', 'send:1'])
 })
 
-test('time budget -> stops before a chunk it cannot finish, lock released', async () => {
+test('chunk budget covers two worst-case reads, a submit and the receipt wait', () => {
+  assert.equal(CLAIM_CHUNK_BUDGET_MS, 2 * 16_150 + 5_000 + 15_000)
+})
+
+test('slow RPC before chunk 1 -> outOfTime with the claimable count, nothing sent, lock released', async () => {
+  world.betCount = 30
+  world.delayMs.multicall = 1_500 // the claimable-set read eats the last of the budget
+  const out = await run(Date.now() + CLAIM_CHUNK_BUDGET_MS + 1_000)
+  assert.deepEqual(out, { kind: 'outOfTime', remainingCount: 30 })
+  assert.equal(world.sent.length, 0)
+  assert.deepEqual(world.trace, ['acquire', 'release'])
+})
+
+test('slow RPC inside chunk 1 -> chunk 2 never starts, remainingCount reported, lock released', async () => {
   world.betCount = 60
-  const out = await run(Date.now() + 1_000) // first chunk always runs; no room for a second
+  world.delayMs.chunkSimulate = 1_500
+  const out = await run(Date.now() + CLAIM_CHUNK_BUDGET_MS + 1_000) // room for chunk 1 only
   assert.equal(out.kind, 'claimed')
   assert.equal(out.txHashes.length, 1)
   assert.equal(out.remainingCount, 35)
   assert.equal(out.incomplete, undefined)
   assert.deepEqual(world.trace, ['acquire', 'send:1', 'release'])
+})
+
+test('step 1: factory read fails -> 502 RpcError (not a 500), no lock taken', async () => {
+  world.betCount = 5
+  world.readFail.gameIdByMarket = true
+  const out = await run()
+  assert.equal(out.kind, 'error')
+  assert.equal(out.status, 502)
+  assert.equal(out.error, 'RpcError')
+  assert.deepEqual(world.trace, [])
+})
+
+test('step 1: getCode fails on a non-v1.6 address -> 502 RpcError (not a 500)', async () => {
+  world.gameId = ''
+  world.readFail.getCode = true
+  const out = await run()
+  assert.equal(out.status, 502)
+  assert.equal(out.error, 'RpcError')
+  assert.deepEqual(world.trace, [])
+})
+
+test('step 1 still distinguishes no contract (404) from another factory (409)', async () => {
+  world.gameId = ''
+  world.code = '0x'
+  assert.equal((await run()).status, 404)
+  world.code = '0x60'
+  const out = await run()
+  assert.equal(out.status, 409)
+  assert.equal(out.error, 'UnsupportedMarket')
 })
 
 test('no bets -> nothing, no lock taken', async () => {

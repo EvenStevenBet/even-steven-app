@@ -5,9 +5,9 @@ import {
   type Address,
   type Hash,
 } from 'viem'
-import { serverPublicClient } from '@/lib/server-client'
+import { claimPublicClient, CLAIM_RPC_WORST_CASE_MS } from '@/lib/claim-rpc'
 import { marketAbi, factoryAbi, erc20Abi, V1_6_FACTORY } from '@/lib/contracts'
-import { relayAccount, relayWalletClient, getRelayEthBalance, RELAY_MIN_ETH } from '@/lib/relay'
+import { relayAccount, relayWalletClient, RELAY_MIN_ETH } from '@/lib/relay'
 import { acquireClaimLock, refreshClaimLock, releaseClaimLock, CLAIM_LOCK_TTL_SECONDS } from '@/lib/claim-abuse'
 import { attributionSuffix } from '@/lib/attribution'
 
@@ -26,8 +26,11 @@ const RECEIPT_TIMEOUT_MS = 15_000
 // CLAIM_CHUNK_SIZE bets and reports the rest as remainingCount.
 export const CLAIM_CHUNK_SIZE = 25
 export const CLAIM_MAX_CHUNKS = 8
-// Worst case for one chunk: simulate, balance read, submit, then the receipt wait.
-export const CLAIM_CHUNK_BUDGET_MS = RECEIPT_TIMEOUT_MS + 10_000
+// Time one chunk may need: the simulate and balance reads at their worst case
+// on the claim read client, the submit, then the receipt wait. No chunk —
+// the first included — starts unless this much time is left before the deadline.
+const SUBMIT_ALLOWANCE_MS = 5_000
+export const CLAIM_CHUNK_BUDGET_MS = 2 * CLAIM_RPC_WORST_CASE_MS + SUBMIT_ALLOWANCE_MS + RECEIPT_TIMEOUT_MS
 const RELAY_BUSY_RETRY_SECONDS = 5
 
 type ClaimFailure = { kind: 'error'; status: number; error: string; message: string; details?: Record<string, unknown> }
@@ -46,6 +49,8 @@ export type ClaimOutcome =
       incomplete?: { error: string; message: string; details?: Record<string, unknown> }
     }
   | { kind: 'nothing' }
+  // Out of time before the first chunk: nothing was submitted, the lock is released.
+  | { kind: 'outOfTime'; remainingCount: number }
   | ClaimFailure
 
 function failure(status: number, error: string, message: string, details?: Record<string, unknown>): ClaimFailure {
@@ -65,7 +70,7 @@ function isNonceCollision(err: unknown): boolean {
 
 /** Empty string when the market was not created by Factory v1.6. */
 export async function v16GameId(market: Address): Promise<string> {
-  return serverPublicClient.readContract({
+  return claimPublicClient.readContract({
     address: V1_6_FACTORY, abi: factoryAbi, functionName: 'gameIdByMarket', args: [market],
   })
 }
@@ -77,12 +82,12 @@ export async function v16GameId(market: Address): Promise<string> {
  * window (ClaimWindowExpired) all drop out here. Throws on RPC failure.
  */
 export async function findClaimableBetIds(market: Address, bettor: Address, relay: Address): Promise<bigint[]> {
-  const ids = await serverPublicClient.readContract({
+  const ids = await claimPublicClient.readContract({
     address: market, abi: marketAbi, functionName: 'getBetsByAddress', args: [bettor],
   })
   if (ids.length === 0) return []
 
-  const bets = await serverPublicClient.multicall({
+  const bets = await claimPublicClient.multicall({
     contracts: ids.map((id) => ({ address: market, abi: marketAbi, functionName: 'getBet' as const, args: [id] as const })),
     allowFailure: false,
   })
@@ -90,7 +95,7 @@ export async function findClaimableBetIds(market: Address, bettor: Address, rela
 
   const results = await Promise.all(unclaimed.map(async (id) => {
     try {
-      await serverPublicClient.simulateContract({
+      await claimPublicClient.simulateContract({
         address: market, abi: marketAbi, functionName: 'claimPayoutFor', args: [bettor, [id]], account: relay,
       })
       return id
@@ -115,7 +120,7 @@ async function claimChunk(market: Address, bettor: Address, ids: bigint[], log: 
   // a. Simulate the exact batch from the relay
   let submit: () => Promise<Hash>
   try {
-    const { request: tx } = await serverPublicClient.simulateContract({
+    const { request: tx } = await claimPublicClient.simulateContract({
       address: market, abi: marketAbi, functionName: 'claimPayoutFor', args: [bettor, ids], account: relayAccount!,
       dataSuffix: attributionSuffix(), // Even Steven's Base builder code; the market ignores it
     })
@@ -132,7 +137,7 @@ async function claimChunk(market: Address, bettor: Address, ids: bigint[], log: 
   // b. Never submit from an underfunded relay
   let relayBalance: bigint
   try {
-    relayBalance = await getRelayEthBalance()
+    relayBalance = await claimPublicClient.getBalance({ address: relay })
   } catch (err) {
     console.error(`${log} relay balance read failed`, err)
     return stop(false, failure(502, 'RpcError', 'could not read the relay balance'))
@@ -167,7 +172,7 @@ async function claimChunk(market: Address, bettor: Address, ids: bigint[], log: 
 
   let receipt
   try {
-    receipt = await serverPublicClient.waitForTransactionReceipt({ hash: txHash, timeout: RECEIPT_TIMEOUT_MS })
+    receipt = await claimPublicClient.waitForTransactionReceipt({ hash: txHash, timeout: RECEIPT_TIMEOUT_MS })
   } catch {
     return stop(true, failure(504, 'SubmissionPending', 'transaction submitted but not yet mined; check txHash', { txHash }))
   }
@@ -220,7 +225,8 @@ async function claimChunk(market: Address, bettor: Address, ids: bigint[], log: 
  * Finds everything claimable for bettor on a v1.11 market and claims it in up
  * to CLAIM_MAX_CHUNKS sequential relayed claimPayoutFor transactions of
  * CLAIM_CHUNK_SIZE bets, holding the claim:{market}:{bettor} lock for the
- * whole request. No chunk starts unless it can finish before deadline (ms).
+ * whole request. No chunk, the first included, starts unless it can finish
+ * before deadline (ms); out of time before the first returns outOfTime.
  * Chunks already mined stand when a later one fails. The lock is released when
  * the request ends with nothing in flight, and otherwise kept until it expires.
  */
@@ -232,8 +238,21 @@ export async function runClaim(market: Address, bettor: Address, log: string, de
   const relay = relayAccount.address
 
   // 1. Only Factory v1.6 markets have claimPayoutFor
-  if ((await v16GameId(market)) === '') {
-    const code = await serverPublicClient.getCode({ address: market })
+  let gameId: string
+  try {
+    gameId = await v16GameId(market)
+  } catch (err) {
+    console.error(`${log} reading the factory failed`, err)
+    return failure(502, 'RpcError', 'could not read the market from the chain')
+  }
+  if (gameId === '') {
+    let code
+    try {
+      code = await claimPublicClient.getCode({ address: market })
+    } catch (err) {
+      console.error(`${log} reading the market's code failed`, err)
+      return failure(502, 'RpcError', 'could not read the market from the chain')
+    }
     if (!code || code === '0x') return failure(404, 'MarketNotFound', `no contract at ${market}`)
     return failure(409, 'UnsupportedMarket',
       'market was not created by SportsbookFactory v1.6; only v1.11 markets support relayed claiming',
@@ -274,8 +293,8 @@ export async function runClaim(market: Address, bettor: Address, log: string, de
   let stopped: Extract<ChunkResult, { ok: false }> | null = null
 
   for (const [i, ids] of chunks.entries()) {
+    if (Date.now() + CLAIM_CHUNK_BUDGET_MS > deadline) break
     if (i > 0) {
-      if (Date.now() + CLAIM_CHUNK_BUDGET_MS > deadline) break
       try {
         await refreshClaimLock(market, bettor)
       } catch (err) {
@@ -300,6 +319,10 @@ export async function runClaim(market: Address, bettor: Address, log: string, de
     return claimed.length === 0
       ? f
       : failure(f.status, f.error, f.message, { ...f.details, txHashes, claimedCount: claimed.length })
+  }
+  if (claimed.length === 0) {
+    console.warn(`${log} out of time before the first chunk; nothing submitted`, { market, bettor, claimable: betIds.length })
+    return { kind: 'outOfTime', remainingCount: betIds.length }
   }
   const f = stopped?.failure
   return {

@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "type-check": "tsc --noEmit",
-    "test:claim": "node --experimental-test-module-mocks --no-warnings --import ./test/alias-loader.mjs --test test/claim-chunking.test.mjs"
+    "test:claim": "node --experimental-test-module-mocks --no-warnings --import ./test/alias-loader.mjs --test test/claim-chunking.test.mjs test/claim-rpc.test.mjs"
   },
   "dependencies": {
     "@coinbase/onchainkit": "^0.38.0",

@@ -127,6 +127,8 @@ async function run() {
         txHashes: outcome.txHashes, remainingCount: outcome.remainingCount, incomplete: outcome.incomplete?.error,
       })
       if (outcome.incomplete && STOP_RUN_ERRORS.has(outcome.incomplete.error)) { stoppedBy = outcome.incomplete.error; break }
+    } else if (outcome.kind === 'outOfTime') {
+      stoppedBy = 'TimeBudget'; break
     } else if (outcome.kind === 'error') {
       // ClaimInFlight just means POST /api/claim got there first.
       if (outcome.error !== 'ClaimInFlight') {
