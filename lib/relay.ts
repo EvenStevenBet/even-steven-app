@@ -28,7 +28,10 @@ if (
   throw new Error('SERVER_ALCHEMY_KEY and NEXT_PUBLIC_ALCHEMY_KEY must be different API keys')
 }
 
-if (!process.env.RELAY_PRIVATE_KEY && process.env.NODE_ENV === 'production' && !isBuildPhase) {
+// A missing key is fatal only in the Vercel Production environment. Preview deployments also run
+// with NODE_ENV=production but must not hold the relay key: there the relay stays null and the
+// routes answer their existing 503 RelayNotConfigured instead of failing at import.
+if (!process.env.RELAY_PRIVATE_KEY && process.env.VERCEL_ENV === 'production' && !isBuildPhase) {
   throw new Error(
     'RELAY_PRIVATE_KEY is not set. POST /api/bet cannot submit relayed bets. ' +
       'Set it in the Vercel Production environment.'
