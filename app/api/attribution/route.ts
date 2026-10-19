@@ -6,11 +6,12 @@ import { clientIp } from '@/lib/abuse'
 import { refsFromCalldata } from '@/lib/attribution'
 import { buildRecord, consumeAttributionRateLimit, hasAttribution, recordAttribution } from '@/lib/attribution-store'
 import { resolveRefForBettor, type ResolvedRef } from '@/lib/refs'
+import { isRelaySender } from '@/lib/relay-addresses'
+import relayConfig from '@/data/relay.json'
 
 export const dynamic = 'force-dynamic'
 
 const V1_6_FACTORY: Address = '0x5906370b9831728ec523b647137a1bbf0ab45390'
-const RELAY: Address = '0x8a3eee4f6aD1c03Dc3d898ecD61283560Bd42fed'
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/
 
 function fail(status: number, error: string, message: string) {
@@ -95,7 +96,8 @@ async function handle(request: NextRequest) {
       stake: bet.args.stake, fee: bet.args.fee,
     },
     ref,
-    tx.from.toLowerCase() === RELAY.toLowerCase() ? 'relay' : 'web',
+    // current, previous and next relay all count, so the label survives a key rotation (data/relay.json)
+    isRelaySender(tx.from, relayConfig) ? 'relay' : 'web',
     block.timestamp,
   )
   const written = await recordAttribution(record)
