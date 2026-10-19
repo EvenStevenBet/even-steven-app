@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "type-check": "tsc --noEmit",
+    "test:ref": "node --experimental-test-module-mocks --no-warnings --import ./test/alias-loader.mjs --test test/share-ref.test.mjs test/resolve-ref.test.mjs",
     "test:claim": "node --experimental-test-module-mocks --no-warnings --import ./test/alias-loader.mjs --test test/claim-chunking.test.mjs test/claim-rpc.test.mjs"
   },
   "dependencies": {
