@@ -53,10 +53,14 @@ test('a missing next is fine', () => {
   assert.equal(parseRelayConfig({ current: OLD, previous: [] }).next, null)
 })
 
-test('the committed data/relay.json is valid and never lists an owner or x402 address', () => {
+test('the committed data/relay.json is valid, keeps the old relay as previous, and never lists an owner or x402 address', () => {
   const cfg = JSON.parse(readFileSync(new URL('../data/relay.json', import.meta.url), 'utf8'))
   const parsed = parseRelayConfig(cfg)
-  assert.equal(parsed.current, OLD)
+  assert.notEqual(parsed.current, OLD, 'current is the new relay after the rotation')
+  assert.deepEqual(parsed.previous, [OLD])
+  assert.equal(parsed.next, null)
+  assert.equal(isRelaySender(OLD, cfg), true) // old transactions still label as relayed
+  assert.equal(isRelaySender(parsed.current, cfg), true)
   const listed = [...relaySenders(cfg)]
   for (const forbidden of [OWNER, V15_WALLET]) assert.ok(!listed.includes(forbidden.toLowerCase()), forbidden)
 })
