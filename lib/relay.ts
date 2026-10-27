@@ -12,7 +12,8 @@ import { serverPublicClient } from '@/lib/server-client'
 // and seed returns, and the x402 receiver is paid in USDC — a relay key that is
 // also one of those would put USDC custody and the gas-paying hot key in one place.
 const FORBIDDEN_RELAY_ADDRESSES = [
-  '0x2e5Ff49699f0dA2E8A6a43f34BffC1c740E67916', // owner, Factory v1.6 + all its markets
+  '0x28953e3FCCfC0Ae1c4d5899c795Df41667c5B336', // owner v4, Factory v1.6 (from 2026-10-27)
+  '0x2e5Ff49699f0dA2E8A6a43f34BffC1c740E67916', // owner v3, retired; still owns the 9 markets it created
   '0x6cF0A0b5282409E24dC35e2c1834f9111315603B', // owner, Factory v1.5 era
 ]
 
