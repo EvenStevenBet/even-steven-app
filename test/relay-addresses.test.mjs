@@ -11,6 +11,7 @@ const NEW = '0x4444444444444444444444444444444444444444'
 const OLDER = '0x5555555555555555555555555555555555555555'
 const STRANGER = '0x6666666666666666666666666666666666666666'
 const OWNER = '0x2e5Ff49699f0dA2E8A6a43f34BffC1c740E67916'
+const OWNER_V4 = '0x28953e3FCCfC0Ae1c4d5899c795Df41667c5B336'
 const V15_WALLET = '0x6cF0A0b5282409E24dC35e2c1834f9111315603B'
 
 test('before the swap: only the current relay counts', () => {
@@ -62,7 +63,7 @@ test('the committed data/relay.json is valid, keeps the old relay as previous, a
   assert.equal(isRelaySender(OLD, cfg), true) // old transactions still label as relayed
   assert.equal(isRelaySender(parsed.current, cfg), true)
   const listed = [...relaySenders(cfg)]
-  for (const forbidden of [OWNER, V15_WALLET]) assert.ok(!listed.includes(forbidden.toLowerCase()), forbidden)
+  for (const forbidden of [OWNER, OWNER_V4, V15_WALLET]) assert.ok(!listed.includes(forbidden.toLowerCase()), forbidden)
 })
 
 test('POST /api/attribution labels the sender through the shared check, with no hard-coded relay', () => {
