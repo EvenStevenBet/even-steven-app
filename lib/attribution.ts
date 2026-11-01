@@ -10,7 +10,19 @@ const MARKER = '80218021802180218021802180218021'
  * every Even Steven transaction for Base's attribution and rewards, first in the code list,
  * and is never a referrer: refsFromCalldata drops it, so it earns no points or fee share.
  */
-export const ES_BUILDER_CODE = 'bc_ncytgilx'
+export const ES_BUILDER_CODE = 'bc_2wk26wh0'
+
+/**
+ * The code used before the swap. Transactions from 2026-10-01 until the deploy carry it, so it is
+ * still recognised as ours when reading calldata: it never earns points or a fee share either.
+ */
+export const ES_BUILDER_CODE_LEGACY = 'bc_ncytgilx'
+
+/** True for either Even Steven builder code (case-insensitive). Neither is ever a referrer. */
+export function isOwnBuilderCode(code: string): boolean {
+  const lower = code.toLowerCase()
+  return lower === ES_BUILDER_CODE || lower === ES_BUILDER_CODE_LEGACY
+}
 
 const BUILDER_CODE = /^[a-z0-9-]{3,32}$/
 
@@ -18,6 +30,7 @@ const BUILDER_CODE = /^[a-z0-9-]{3,32}$/
 export function normalizeRef(raw: unknown): string | null {
   if (typeof raw !== 'string') return null
   const ref = raw.trim().toLowerCase()
+  if (isOwnBuilderCode(ref)) return null
   if (BUILDER_CODE.test(ref)) return ref
   if (isAddress(ref, { strict: false })) return ref
   return null
@@ -25,14 +38,14 @@ export function normalizeRef(raw: unknown): string | null {
 
 /** The suffix for every Even Steven transaction: our builder code, then the third-party ref if any. */
 export function attributionSuffix(ref?: string | null): Hex {
-  const list = ref && ref !== ES_BUILDER_CODE ? [ES_BUILDER_CODE, ref] : [ES_BUILDER_CODE]
+  const list = ref && !isOwnBuilderCode(ref) ? [ES_BUILDER_CODE, ref] : [ES_BUILDER_CODE]
   const codes = Array.from(new TextEncoder().encode(list.join(',')), (b) => b.toString(16).padStart(2, '0')).join('')
   const length = (codes.length / 2).toString(16).padStart(2, '0')
   return `0x${codes}${length}00${MARKER}`
 }
 
 /**
- * Every third-party schema-0 code found anywhere in the calldata (our own builder code excluded). Scans rather than reading only the
+ * Every third-party schema-0 code found anywhere in the calldata (both Even Steven builder codes excluded). Scans rather than reading only the
  * tail: in a Smart Wallet transaction the placeBet calldata (and its suffix) sits inside
  * EntryPoint.handleOps, followed by ABI padding.
  */
@@ -48,5 +61,5 @@ export function refsFromCalldata(input: Hex): string[] {
     if (!bytes.every((b) => b >= 0x20 && b < 0x7f)) continue
     found.push(...String.fromCharCode(...bytes).split(','))
   }
-  return found.filter((code) => code.toLowerCase() !== ES_BUILDER_CODE)
+  return found.filter((code) => !isOwnBuilderCode(code))
 }

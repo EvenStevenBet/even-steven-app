@@ -41,8 +41,11 @@ test('invalid forms resolve to nothing', () => {
   }
 })
 
-test("Even Steven's own Base code is never a ref", () => {
-  assert.equal(resolveRef('bc_ncytgilx'), null)
+test("Even Steven's own Base codes, current and legacy, are never a ref", () => {
+  for (const own of ['bc_2wk26wh0', 'BC_2WK26WH0', 'bc_ncytgilx', 'BC_NCYTGILX']) {
+    assert.equal(resolveRef(own), null, own)
+    assert.equal(resolveRefForBettor(own, BETTOR), null, own)
+  }
 })
 
 test('a wallet address is a ref of type address, any case', () => {
