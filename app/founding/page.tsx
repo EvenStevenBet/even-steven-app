@@ -3,6 +3,7 @@ import {
   FOUNDING_SEATS_CLAIMED,
   FOUNDING_SEATS_TOTAL,
   FOUNDING_USDC_PLEDGED,
+  FOUNDING_GOAL_WALLETS,
   FOUNDING_FORM_URL,
 } from '@/lib/founding'
 
@@ -57,8 +58,8 @@ export default function FoundingPage() {
 
       <section className="space-y-4">
         <p className="text-white/70 leading-relaxed">
-          A pledge is not a bet. It moves no money, and the market opens only when 10 wallets have
-          pledged. Founding bettors pledge between 25 and 100 USDC and pick no side now.
+          A pledge is not a bet. It moves no money, and the market opens only when{' '}
+          {FOUNDING_GOAL_WALLETS} wallets have pledged. Founding bettors pledge between 25 and 100 USDC and pick no side now.
         </p>
         {FOUNDING_FORM_URL && (
           <a
