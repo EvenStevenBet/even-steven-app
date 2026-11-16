@@ -7,4 +7,4 @@ export const FOUNDING_USDC_PLEDGED = 0
 
 // Pledge form link. The button hides if this is empty.
 export const FOUNDING_FORM_URL =
-  'https://docs.google.com/forms/d/1vgXSp5gS_XoWDdxQYh-EeSHx65vlCWiBAOwFx5al8ig/viewform'
+  'https://docs.google.com/forms/d/e/1FAIpQLSfv1Lvmy12LYH1JlDHHSo4FJwoRIGFTehpZUeCuTOcuNM43LA/viewform'
